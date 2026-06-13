@@ -1,6 +1,6 @@
 {
 	"name": "pi-bansos",
-	"version": "0.1.1",
+	"version": "0.1.2",
 	"description": "Free model provider for pi via OpenCode Zen",
 	"keywords": [
 		"pi-package",
@@ -17,6 +17,5 @@
 	"files": [
 		"extensions",
 		"README.md"
-	],
-	"dependencies": {}
+	]
 }

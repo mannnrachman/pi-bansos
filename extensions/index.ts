@@ -46,8 +46,10 @@ const EXCLUDE = new Set(["minimax-m3-free", "qwen3.6-plus-free"]);
 
 // ── Security: Whitelists & Constants ───────────────────────────────
 
-/** Only allow paths starting with /v1/ (A03/A10: prevents path traversal + SSRF) */
+/** Only allow paths starting with /v1/ (A03/A10: prevents path traversal + SSRF)
+ *  Rejects ".." segments to prevent directory traversal */
 const ALLOWED_PATH_PATTERN = /^\/v1\/[a-zA-Z0-9/_.,\-?&=]*$/;
+const PATH_TRAVERSAL_PATTERN = /\.\./;
 
 /** Only allow safe HTTP methods (A03: prevents CONNECT tunneling) */
 const ALLOWED_METHODS = new Set(["GET", "POST", "OPTIONS", "HEAD"]);
@@ -95,14 +97,19 @@ const RATE_LIMIT_WINDOW_MS = 60_000; // 1 minute
 const RATE_LIMIT_MAX_REQUESTS = 120; // per window
 
 // Cleanup stale entries every 5 minutes
-setInterval(() => {
-	const now = Date.now();
-	for (const [key, entry] of rateLimitMap) {
-		if (entry.resetAt <= now) {
-			rateLimitMap.delete(key);
+let cleanupInterval: ReturnType<typeof setInterval> | null = null;
+
+function startCleanupInterval() {
+	if (cleanupInterval) return;
+	cleanupInterval = setInterval(() => {
+		const now = Date.now();
+		for (const [key, entry] of rateLimitMap) {
+			if (entry.resetAt <= now) {
+				rateLimitMap.delete(key);
+			}
 		}
-	}
-}, 300_000);
+	}, 300_000);
+}
 
 function checkRateLimit(ip: string): boolean {
 	const now = Date.now();
@@ -278,6 +285,11 @@ function validatePath(rawUrl: string): URL | null {
 		return null;
 	}
 
+	// Reject path traversal (..) — A03: prevents directory traversal
+	if (PATH_TRAVERSAL_PATTERN.test(cleaned)) {
+		return null;
+	}
+
 	// Prevent double-encoding tricks
 	try {
 		const decoded = decodeURIComponent(cleaned);
@@ -328,7 +340,8 @@ function sanitizeHeaders(
 }
 
 // ── Start local proxy ──────────────────────────────────────────────
-function startProxy(): http.Server {
+function startProxy(overridePort?: number): http.Server {
+	const effectivePort = overridePort ?? PORT;
 	const server = http.createServer((req, res) => {
 		const clientIP = getClientIP(req);
 		const startTime = Date.now();
@@ -439,8 +452,9 @@ function startProxy(): http.Server {
 			proxy.destroy(new Error("request timeout"));
 		});
 
-		// Handle client disconnect
-		req.on("close", () => {
+		// Handle client abort — only fires when client disconnects prematurely,
+		// NOT when the readable stream ends normally (fixes 502 on every request)
+		req.on("aborted", () => {
 			if (!proxy.destroyed) {
 				proxy.destroy();
 			}
@@ -451,16 +465,18 @@ function startProxy(): http.Server {
 
 	server.on("error", (err: NodeJS.ErrnoException) => {
 		if (err.code === "EADDRINUSE") {
-			log("warn", `port ${PORT} in use — proxy may already be running`);
+			log("warn", `port ${effectivePort} in use — proxy may already be running`);
 			return;
 		}
 		log("error", "server error", { code: err.code, message: err.message });
 	});
 
 	// A09: Log server start
-	log("info", `proxy starting`, { host: HOST, port: PORT });
-	server.listen(PORT, HOST);
-	log("info", `proxy listening on http://${HOST}:${PORT}`);
+	log("info", `proxy starting`, { host: HOST, port: effectivePort });
+	server.listen(effectivePort, HOST);
+	log("info", `proxy listening on http://${HOST}:${effectivePort}`);
+
+	startCleanupInterval();
 
 	return server;
 }
@@ -504,6 +520,10 @@ export default async function (pi: ExtensionAPI) {
 		log("info", "shutting down proxy...");
 		server.close();
 		rateLimitMap.clear();
+		if (cleanupInterval) {
+			clearInterval(cleanupInterval);
+			cleanupInterval = null;
+		}
 		log("info", "shutdown complete");
 	});
 }
