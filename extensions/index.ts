@@ -23,38 +23,59 @@ const PORT = Number(process.env.BANSOS_PORT) || 18080;
 const HOST = "127.0.0.1";
 const API = `${UPSTREAM}/v1`;
 
-// Security: model cache TTL (default 1 hour)
-const MODEL_CACHE_TTL_MS = Number(process.env.BANSOS_CACHE_TTL) || 3_600_000;
+// ── Hardcoded Free Models ──────────────────────────────────────────
+// Update this list manually when models change.
+// On startup, each model is tested for availability.
+interface ModelDef {
+	id: string;
+	name: string;
+	reasoning: boolean;
+	contextWindow: number;
+	maxTokens: number;
+}
 
-// ── Known context windows (update when new models appear) ──────────
-const CONTEXT: Record<string, number> = {
-	"mimo-v2.5-free": 1_000_000,
-	"deepseek-v4-flash-free": 128_000,
-	"nemotron-3-ultra-free": 128_000,
-	"north-mini-code-free": 128_000,
-	"big-pickle": 128_000,
-};
+const KNOWN_MODELS: ModelDef[] = [
+	{
+		id: "deepseek-v4-flash-free",
+		name: "DeepSeek V4 Flash",
+		reasoning: true,
+		contextWindow: 128_000,
+		maxTokens: 16_384,
+	},
+	{
+		id: "mimo-v2.5-free",
+		name: "Mimo V2.5",
+		reasoning: false,
+		contextWindow: 128_000,
+		maxTokens: 16_384,
+	},
+	{
+		id: "nemotron-3-ultra-free",
+		name: "Nemotron 3 Ultra",
+		reasoning: true,
+		contextWindow: 128_000,
+		maxTokens: 16_384,
+	},
+	{
+		id: "north-mini-code-free",
+		name: "North Mini Code",
+		reasoning: true,
+		contextWindow: 128_000,
+		maxTokens: 16_384,
+	},
+	{
+		id: "big-pickle",
+		name: "Big Pickle",
+		reasoning: true,
+		contextWindow: 128_000,
+		maxTokens: 16_384,
+	},
+];
 
-const DEFAULT_CONTEXT = 128_000;
-const DEFAULT_MAX_TOKENS = 16_384;
-
-// Known free models that don't have -free suffix
-const KNOWN_FREE = new Set(["big-pickle"]);
-
-// Models to exclude (promos ended, known broken)
-const EXCLUDE = new Set(["minimax-m3-free", "qwen3.6-plus-free"]);
-
-// ── Security: Whitelists & Constants ───────────────────────────────
-
-/** Only allow paths starting with /v1/ (A03/A10: prevents path traversal + SSRF)
- *  Rejects ".." segments to prevent directory traversal */
+// ── Whitelists ─────────────────────────────────────────────────────
 const ALLOWED_PATH_PATTERN = /^\/v1\/[a-zA-Z0-9/_.,\-?&=]*$/;
 const PATH_TRAVERSAL_PATTERN = /\.\./;
-
-/** Only allow safe HTTP methods (A03: prevents CONNECT tunneling) */
 const ALLOWED_METHODS = new Set(["GET", "POST", "OPTIONS", "HEAD"]);
-
-/** Headers that must never be forwarded upstream (A04: header injection) */
 const STRIP_HEADERS = new Set([
 	"authorization",
 	"host",
@@ -70,33 +91,28 @@ const STRIP_HEADERS = new Set([
 	"proxy-authorization",
 ]);
 
-// ── Security: Structured Logger (A09) ──────────────────────────────
-
+// ── Logger ─────────────────────────────────────────────────────────
 type LogLevel = "info" | "warn" | "error" | "audit";
 
 function log(level: LogLevel, message: string, meta?: Record<string, unknown>) {
-	const timestamp = new Date().toISOString();
-	const prefix = `[bansos] [${timestamp}] [${level.toUpperCase()}]`;
+	const ts = new Date().toISOString();
 	const metaStr = meta ? ` ${JSON.stringify(meta)}` : "";
+	const line = `[bansos] [${ts}] [${level.toUpperCase()}] ${message}${metaStr}`;
 	if (level === "error") {
-		console.error(`${prefix} ${message}${metaStr}`);
+		console.error(line);
 	} else {
-		console.log(`${prefix} ${message}${metaStr}`);
+		console.log(line);
 	}
 }
 
-// ── Security: Rate Limiter (A07) ───────────────────────────────────
-
+// ── Rate Limiter ───────────────────────────────────────────────────
 interface RateLimitEntry {
 	count: number;
 	resetAt: number;
 }
-
 const rateLimitMap = new Map<string, RateLimitEntry>();
-const RATE_LIMIT_WINDOW_MS = 60_000; // 1 minute
-const RATE_LIMIT_MAX_REQUESTS = 120; // per window
-
-// Cleanup stale entries every 5 minutes
+const RATE_LIMIT_WINDOW_MS = 60_000;
+const RATE_LIMIT_MAX = 120;
 let cleanupInterval: ReturnType<typeof setInterval> | null = null;
 
 function startCleanupInterval() {
@@ -104,9 +120,7 @@ function startCleanupInterval() {
 	cleanupInterval = setInterval(() => {
 		const now = Date.now();
 		for (const [key, entry] of rateLimitMap) {
-			if (entry.resetAt <= now) {
-				rateLimitMap.delete(key);
-			}
+			if (entry.resetAt <= now) rateLimitMap.delete(key);
 		}
 	}, 300_000);
 }
@@ -114,183 +128,46 @@ function startCleanupInterval() {
 function checkRateLimit(ip: string): boolean {
 	const now = Date.now();
 	const entry = rateLimitMap.get(ip);
-
 	if (!entry || entry.resetAt <= now) {
 		rateLimitMap.set(ip, { count: 1, resetAt: now + RATE_LIMIT_WINDOW_MS });
 		return true;
 	}
-
-	if (entry.count >= RATE_LIMIT_MAX_REQUESTS) {
-		return false;
-	}
-
+	if (entry.count >= RATE_LIMIT_MAX) return false;
 	entry.count++;
 	return true;
 }
 
-// ── Security: Model Cache with TTL (A08) ───────────────────────────
-
-interface ModelCache {
-	models: ZenModel[];
-	fetchedAt: number;
-}
-
-let modelCache: ModelCache | null = null;
-
-interface ZenModel {
-	id: string;
-	name: string;
-	reasoning: boolean;
-	contextWindow: number;
-	maxTokens: number;
-}
-
-// ── Fetch & verify free models ─────────────────────────────────────
-async function fetchModels(): Promise<ZenModel[]> {
-	// Check cache first (A08: integrity - serve cached data within TTL)
-	if (modelCache && Date.now() - modelCache.fetchedAt < MODEL_CACHE_TTL_MS) {
-		log("info", `serving ${modelCache.models.length} cached model(s)`, {
-			cacheAge: `${Math.round((Date.now() - modelCache.fetchedAt) / 1000)}s`,
-		});
-		return modelCache.models;
-	}
-
-	log("info", "fetching model list from upstream...");
-
-	let res: Response;
+// ── Health Check ───────────────────────────────────────────────────
+async function checkModelAlive(id: string): Promise<boolean> {
 	try {
-		res = await fetch(`${API}/models`);
-	} catch (err) {
-		log("error", "failed to fetch models (network error)", {
-			error: err instanceof Error ? err.message : String(err),
+		const res = await fetch(`${API}/chat/completions`, {
+			method: "POST",
+			headers: { "content-type": "application/json" },
+			body: JSON.stringify({
+				model: id,
+				messages: [{ role: "user", content: "hi" }],
+				max_tokens: 1,
+				stream: false,
+			}),
+			signal: AbortSignal.timeout(10_000),
 		});
-		// Return cached data if available, even if stale
-		if (modelCache) {
-			log("warn", "returning stale cache due to network error");
-			return modelCache.models;
-		}
-		throw err;
-	}
-
-	if (!res.ok) {
-		log("error", `models fetch failed`, { status: res.status });
-		if (modelCache) {
-			log("warn", "returning stale cache due to upstream error");
-			return modelCache.models;
-		}
-		throw new Error(`models fetch failed: ${res.status}`);
-	}
-
-	const data = (await res.json()) as { data: Array<{ id: string }> };
-
-	// Validate response structure (A08: data integrity)
-	if (!Array.isArray(data?.data)) {
-		log("error", "invalid response structure from upstream");
-		if (modelCache) return modelCache.models;
-		throw new Error("invalid models response");
-	}
-
-	const candidates = data.data
-		.map((m) => m.id)
-		.filter(
-			(id) =>
-				typeof id === "string" &&
-				id.length > 0 &&
-				id.length < 128 && // sanity check
-				!EXCLUDE.has(id) &&
-				(id.endsWith("-free") || KNOWN_FREE.has(id)),
-		);
-
-	log("info", `found ${candidates.length} candidate model(s)`, {
-		candidates: candidates.join(", "),
-	});
-
-	const verified: ZenModel[] = [];
-	for (const id of candidates) {
-		try {
-			const ok = await testModel(id);
-			if (ok) {
-				verified.push({
-					id,
-					name: formatName(id),
-					reasoning: id.includes("nemotron") || id.includes("mimo"),
-					contextWindow: CONTEXT[id] ?? DEFAULT_CONTEXT,
-					maxTokens: DEFAULT_MAX_TOKENS,
-				});
-				log("audit", `model verified: ${id}`);
-			} else {
-				log("info", `model rejected (not free): ${id}`);
-			}
-		} catch (err) {
-			log("warn", `model test failed: ${id}`, {
-				error: err instanceof Error ? err.message : String(err),
-			});
-		}
-	}
-
-	// Update cache (A08: integrity)
-	modelCache = { models: verified, fetchedAt: Date.now() };
-	log("info", `cache updated: ${verified.length} model(s) verified`);
-
-	return verified;
-}
-
-// ── Test if model is free ──────────────────────────────────────────
-async function testModel(id: string): Promise<boolean> {
-	// Validate model ID format (A03: injection prevention)
-	if (!/^[a-zA-Z0-9._-]+$/.test(id) || id.length > 128) {
-		log("warn", `invalid model ID format: ${id}`);
+		// Model is alive if API responds (even with error)
+		return res.ok || res.status === 400 || res.status === 429;
+	} catch {
 		return false;
 	}
-
-	const res = await fetch(`${API}/chat/completions`, {
-		method: "POST",
-		headers: { "content-type": "application/json" },
-		body: JSON.stringify({
-			model: id,
-			messages: [{ role: "user", content: "1" }],
-			max_tokens: 1,
-			stream: false,
-		}),
-	});
-	if (!res.ok) return false;
-	const data = (await res.json()) as { cost?: string };
-	return !data.cost || data.cost === "0" || data.cost === "0.0";
 }
 
-// ── Pretty name ────────────────────────────────────────────────────
-function formatName(id: string): string {
-	return id
-		.replace(/-free$/, "")
-		.replace(/-/g, " ")
-		.replace(/\b\w/g, (c) => c.toUpperCase());
-}
-
-// ── Security: Extract client IP from socket ────────────────────────
 function getClientIP(req: http.IncomingMessage): string {
 	const addr = req.socket.remoteAddress;
 	if (!addr) return "unknown";
-	// Normalize IPv6 mapped IPv4
-	if (addr.startsWith("::ffff:")) return addr.slice(7);
-	return addr;
+	return addr.startsWith("::ffff:") ? addr.slice(7) : addr;
 }
 
-// ── Security: Validate and sanitize path (A03/A10) ─────────────────
 function validatePath(rawUrl: string): URL | null {
-	// Remove leading slashes and normalize
 	const cleaned = rawUrl.replace(/^\/+/, "");
-
-	// Check against whitelist pattern
-	if (!ALLOWED_PATH_PATTERN.test(`/${cleaned}`)) {
-		return null;
-	}
-
-	// Reject path traversal (..) — A03: prevents directory traversal
-	if (PATH_TRAVERSAL_PATTERN.test(cleaned)) {
-		return null;
-	}
-
-	// Prevent double-encoding tricks
+	if (!ALLOWED_PATH_PATTERN.test(`/${cleaned}`)) return null;
+	if (PATH_TRAVERSAL_PATTERN.test(cleaned)) return null;
 	try {
 		const decoded = decodeURIComponent(cleaned);
 		if (decoded !== cleaned && !ALLOWED_PATH_PATTERN.test(`/${decoded}`)) {
@@ -299,7 +176,6 @@ function validatePath(rawUrl: string): URL | null {
 	} catch {
 		return null;
 	}
-
 	try {
 		return new URL(cleaned, `${UPSTREAM}/`);
 	} catch {
@@ -307,46 +183,36 @@ function validatePath(rawUrl: string): URL | null {
 	}
 }
 
-// ── Security: Sanitize headers for upstream (A04) ──────────────────
 function sanitizeHeaders(
 	incoming: http.IncomingHttpHeaders,
 	targetHost: string,
 ): Record<string, string> {
 	const sanitized: Record<string, string> = {};
-
 	for (const [key, value] of Object.entries(incoming)) {
 		const lower = key.toLowerCase();
-
-		// Skip stripped headers
 		if (STRIP_HEADERS.has(lower)) continue;
-
-		// Skip pseudo-headers
 		if (lower.startsWith(":")) continue;
-
-		// Only forward safe headers
 		if (typeof value === "string") {
 			sanitized[lower] = value;
 		} else if (Array.isArray(value)) {
 			sanitized[lower] = value.join(", ");
 		}
 	}
-
-	// Set required headers explicitly
 	sanitized.host = targetHost;
 	sanitized["accept-encoding"] = "identity";
 	sanitized.connection = "close";
-
 	return sanitized;
 }
 
 // ── Start local proxy ──────────────────────────────────────────────
 function startProxy(overridePort?: number): http.Server {
 	const effectivePort = overridePort ?? PORT;
+
 	const server = http.createServer((req, res) => {
 		const clientIP = getClientIP(req);
 		const startTime = Date.now();
 
-		// A07: Rate limiting
+		// Rate limiting
 		if (!checkRateLimit(clientIP)) {
 			log("warn", "rate limit exceeded", { ip: clientIP });
 			res.writeHead(429, { "content-type": "application/json" });
@@ -354,7 +220,7 @@ function startProxy(overridePort?: number): http.Server {
 			return;
 		}
 
-		// A03: Method whitelist
+		// Method whitelist
 		if (!ALLOWED_METHODS.has(req.method ?? "")) {
 			log("audit", "method not allowed", {
 				ip: clientIP,
@@ -366,7 +232,7 @@ function startProxy(overridePort?: number): http.Server {
 			return;
 		}
 
-		// Handle CORS preflight (safe: no credentials)
+		// CORS preflight
 		if (req.method === "OPTIONS") {
 			res.writeHead(204, {
 				"access-control-allow-origin": "http://localhost",
@@ -377,7 +243,7 @@ function startProxy(overridePort?: number): http.Server {
 			return;
 		}
 
-		// A03/A10: Validate path
+		// Validate path
 		const target = validatePath(req.url ?? "/");
 		if (!target) {
 			log("audit", "invalid path rejected", {
@@ -390,15 +256,8 @@ function startProxy(overridePort?: number): http.Server {
 			return;
 		}
 
-		// A04: Sanitize headers
+		// Sanitize headers
 		const fwd = sanitizeHeaders(req.headers, target.hostname);
-
-		log("audit", "proxying request", {
-			ip: clientIP,
-			method: req.method,
-			path: target.pathname,
-			target: target.hostname,
-		});
 
 		const proxy = https.request(
 			{
@@ -410,8 +269,6 @@ function startProxy(overridePort?: number): http.Server {
 			},
 			(upstream) => {
 				const outHeaders: Record<string, string> = {};
-
-				// Forward safe response headers only
 				const safeResponseHeaders = [
 					"content-type",
 					"cache-control",
@@ -423,11 +280,8 @@ function startProxy(overridePort?: number): http.Server {
 						outHeaders[h] = val;
 					}
 				}
-
-				// Add security headers
 				outHeaders["x-content-type-options"] = "nosniff";
 				outHeaders["x-frame-options"] = "DENY";
-
 				res.writeHead(upstream.statusCode ?? 502, outHeaders);
 				upstream.pipe(res);
 			},
@@ -447,13 +301,12 @@ function startProxy(overridePort?: number): http.Server {
 			res.end(JSON.stringify({ error: "upstream error" }));
 		});
 
-		// A07: Per-request timeout (30s, shorter than global 120s)
+		// Per-request timeout
 		proxy.setTimeout(30_000, () => {
 			proxy.destroy(new Error("request timeout"));
 		});
 
-		// Handle client abort — only fires when client disconnects prematurely,
-		// NOT when the readable stream ends normally (fixes 502 on every request)
+		// Handle client abort
 		req.on("aborted", () => {
 			if (!proxy.destroyed) {
 				proxy.destroy();
@@ -465,19 +318,19 @@ function startProxy(overridePort?: number): http.Server {
 
 	server.on("error", (err: NodeJS.ErrnoException) => {
 		if (err.code === "EADDRINUSE") {
-			log("warn", `port ${effectivePort} in use — proxy may already be running`);
+			log(
+				"warn",
+				`port ${effectivePort} in use — proxy may already be running`,
+			);
 			return;
 		}
 		log("error", "server error", { code: err.code, message: err.message });
 	});
 
-	// A09: Log server start
-	log("info", `proxy starting`, { host: HOST, port: effectivePort });
 	server.listen(effectivePort, HOST);
 	log("info", `proxy listening on http://${HOST}:${effectivePort}`);
 
 	startCleanupInterval();
-
 	return server;
 }
 
@@ -487,25 +340,39 @@ export default async function (pi: ExtensionAPI) {
 
 	const server = startProxy();
 
-	log("info", "fetching free models...");
-	const models = await fetchModels();
+	log("info", `checking ${KNOWN_MODELS.length} model(s) availability...`);
 
-	if (models.length === 0) {
-		log("warn", "no free models found — extension inactive");
+	// Health check each model in parallel
+	const aliveChecks = await Promise.all(
+		KNOWN_MODELS.map(async (model) => {
+			const alive = await checkModelAlive(model.id);
+			if (alive) {
+				log("info", `✓ ${model.id} is alive`);
+			} else {
+				log("warn", `✗ ${model.id} is dead — skipping`);
+			}
+			return { ...model, alive };
+		}),
+	);
+
+	const aliveModels = aliveChecks.filter((m) => m.alive);
+
+	if (aliveModels.length === 0) {
+		log("warn", "no alive models found — extension inactive");
 		return;
 	}
 
 	log(
 		"info",
-		`${models.length} free model(s) registered: ${models.map((m) => `${m.id} (${m.contextWindow / 1000}K)`).join(", ")}`,
+		`${aliveModels.length} model(s) registered: ${aliveModels.map((m) => m.id).join(", ")}`,
 	);
 
 	pi.registerProvider("bansos", {
 		baseUrl: `http://${HOST}:${PORT}/v1`,
 		apiKey: "placeholder",
 		api: "openai-completions",
-		compat: { supportsDeveloperRole: true, supportsReasoningEffort: true },
-		models: models.map((m) => ({
+		compat: { supportsDeveloperRole: false, supportsReasoningEffort: true },
+		models: aliveModels.map((m) => ({
 			id: m.id,
 			name: m.name,
 			reasoning: m.reasoning,
@@ -513,6 +380,7 @@ export default async function (pi: ExtensionAPI) {
 			contextWindow: m.contextWindow,
 			maxTokens: m.maxTokens,
 			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+			compat: { supportsDeveloperRole: false, supportsReasoningEffort: true },
 		})),
 	});
 
