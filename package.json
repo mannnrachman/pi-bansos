@@ -1,0 +1,22 @@
+{
+	"name": "pi-bansos",
+	"version": "0.1.1",
+	"description": "Free model provider for pi via OpenCode Zen",
+	"keywords": [
+		"pi-package",
+		"pi-extension",
+		"free-models"
+	],
+	"author": "mannrachman",
+	"license": "MIT",
+	"pi": {
+		"extensions": [
+			"./extensions"
+		]
+	},
+	"files": [
+		"extensions",
+		"README.md"
+	],
+	"dependencies": {}
+}
