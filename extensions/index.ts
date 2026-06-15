@@ -5,6 +5,7 @@
  */
 import http from "node:http";
 import https from "node:https";
+import { Readable } from "node:stream";
 import { createHash } from "node:crypto";
 import os from "node:os";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
@@ -258,47 +259,60 @@ function startProxy(overridePort?: number): http.Server {
 				parsedBody = JSON.parse(bodyStr);
 				if (parsedBody.model === "mimo-auto") {
 					isMimo = true;
-					log("info", `routing mimo-free: ${parsedBody.model}`);
 				}
 			} catch {}
 
 			try {
 				if (isMimo) {
-					// Mimo Free routing
+					// Mimo Free routing (Xiaomi upstream)
+					const isStream = parsedBody.stream === true;
 					const jwt = await bootstrapJwt();
 					const transformedBody = injectSystemMarker(parsedBody);
 
-					const mimoHeaders = {
+					const buildHeaders = (token: string) => ({
 						"Content-Type": "application/json",
-						"Authorization": `Bearer ${jwt}`,
+						"Authorization": `Bearer ${token}`,
 						"X-Mimo-Source": "mimocode-cli-free",
 						"x-session-affinity": getSessionId(),
-						"Accept": "application/json",
-					};
-
-					let response = await fetch(MIMO_CHAT_URL, {
-						method: "POST",
-						headers: mimoHeaders,
-						body: JSON.stringify(transformedBody),
-						signal: AbortSignal.timeout(30_000),
+						"Accept": isStream ? "text/event-stream" : "application/json",
 					});
 
-					// Retry once on auth failure (per 9router mimo-free.js:127-134)
+					const doFetch = (token: string) =>
+						fetch(MIMO_CHAT_URL, {
+							method: "POST",
+							headers: buildHeaders(token),
+							body: JSON.stringify(transformedBody),
+							signal: AbortSignal.timeout(60_000),
+						});
+
+					let response = await doFetch(jwt);
+
+					// Retry once on auth failure (per 9router mimo-free.js)
 					if (response.status === 401 || response.status === 403) {
-						log("info", `mimo auth retry (${response.status}), re-bootstrapping...`);
+						log("warn", `mimo auth ${response.status}, re-bootstrapping`);
 						resetJwtCache();
 						const retryJwt = await bootstrapJwt();
-						response = await fetch(MIMO_CHAT_URL, {
-							method: "POST",
-							headers: { ...mimoHeaders, "Authorization": `Bearer ${retryJwt}` },
-							body: JSON.stringify(transformedBody),
-							signal: AbortSignal.timeout(30_000),
-						});
+						response = await doFetch(retryJwt);
 					}
 
-					const responseData = await response.text();
-					res.writeHead(response.status, { "content-type": "application/json" });
-					res.end(responseData);
+					// Pipe streaming SSE as-is, or buffer JSON
+					if (isStream && response.body) {
+						const ct = response.headers.get("content-type") || "text/event-stream";
+						res.writeHead(response.status, {
+							"content-type": ct,
+							"cache-control": "no-cache",
+							"x-accel-buffering": "no",
+						});
+						const nodeStream = Readable.fromWeb(response.body as unknown as import("stream/web").ReadableStream);
+						nodeStream.pipe(res);
+						req.on("aborted", () => { if (!nodeStream.destroyed) nodeStream.destroy(); });
+						req.on("close", () => { if (!nodeStream.destroyed) nodeStream.destroy(); });
+					} else {
+						const data = await response.text();
+						const ct = response.headers.get("content-type") || "application/json";
+						res.writeHead(response.status, { "content-type": ct });
+						res.end(data);
+					}
 				} else {
 					// OpenCode routing (existing)
 					const fwd = sanitizeHeaders(req.headers, target.hostname);
