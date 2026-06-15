@@ -37,7 +37,7 @@ const KNOWN_MODELS: ModelDef[] = [
 
 // Mimo Free models (from xiaomi free API)
 const MIMO_MODELS: ModelDef[] = [
-	{ id: "mimo-v2.5", name: "Mimo V2.5 Free", reasoning: false, contextWindow: 128_000, maxTokens: 16_384 },
+	{ id: "mimo-v2.5-free", name: "Mimo V2.5 Free", reasoning: false, contextWindow: 128_000, maxTokens: 16_384 },
 ];
 
 // ── Whitelists ─────────────────────────────────────────────────────
@@ -219,7 +219,7 @@ function startProxy(overridePort?: number): http.Server {
 			
 			try {
 				parsedBody = JSON.parse(bodyStr);
-				if (parsedBody.model === "mimo-v2.5") {
+				if (parsedBody.model === "mimo-v2.5-free") {
 					isMimo = true;
 					log("info", `routing mimo-free: ${parsedBody.model}`);
 				}
