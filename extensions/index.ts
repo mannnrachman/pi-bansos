@@ -18,6 +18,27 @@ const HOST = "127.0.0.1";
 const API = `${UPSTREAM_OPENCODE}/v1`;
 const MIMO_SYSTEM_MARKER = "You are MiMoCode, an interactive CLI tool that helps users with software engineering tasks.";
 
+// Session affinity (per 9router mimo-free.js) — Xiaomi uses this for rate limit / anti-abuse
+const SESSION_AFFINITY_PREFIX = "ses_";
+const SESSION_ID_LENGTH = 24;
+const SESSION_CHARS = "abcdefghijklmnopqrstuvwxyz0123456789";
+
+function generateSessionId(): string {
+	let id = SESSION_AFFINITY_PREFIX;
+	for (let i = 0; i < SESSION_ID_LENGTH; i++) {
+		id += SESSION_CHARS[Math.floor(Math.random() * SESSION_CHARS.length)];
+	}
+	return id;
+}
+
+let cachedSessionId: string | null = null;
+function getSessionId(): string {
+	if (!cachedSessionId) cachedSessionId = generateSessionId();
+	return cachedSessionId;
+}
+
+const JWT_EXPIRY_BUFFER_MS = 5 * 60 * 1000; // 5 min buffer (per 9router)
+
 // ── Model Definitions ──────────────────────────────────────────────
 interface ModelDef {
 	id: string;
@@ -36,8 +57,9 @@ const KNOWN_MODELS: ModelDef[] = [
 ];
 
 // Mimo Free models (from xiaomi free API)
+// Per 9router/open-sse/config/providerModels.js: "free channel only serves mimo-auto"
 const MIMO_MODELS: ModelDef[] = [
-	{ id: "mimo-v2.5-free", name: "Mimo V2.5 Free", reasoning: false, contextWindow: 128_000, maxTokens: 16_384 },
+	{ id: "mimo-auto", name: "MiMo Auto (Free)", reasoning: false, contextWindow: 128_000, maxTokens: 16_384 },
 ];
 
 // ── Whitelists ─────────────────────────────────────────────────────
@@ -89,9 +111,18 @@ function generateFingerprint(): string {
 	return createHash("sha256").update(seed).digest("hex");
 }
 
+// Parse JWT exp claim (per 9router mimo-free.js parseJwtExp)
+function parseJwtExp(jwt: string): number {
+	try {
+		const payload = JSON.parse(Buffer.from(jwt.split(".")[1], "base64").toString());
+		if (payload.exp) return payload.exp * 1000;
+	} catch {}
+	return Date.now() + 50 * 60 * 1000; // fallback 50 min
+}
+
 async function bootstrapJwt(): Promise<string> {
-	if (cachedJwt && Date.now() < jwtExpiresAt) return cachedJwt;
-	
+	if (cachedJwt && Date.now() < jwtExpiresAt - JWT_EXPIRY_BUFFER_MS) return cachedJwt;
+
 	try {
 		const res = await fetch(MIMO_BOOTSTRAP_URL, {
 			method: "POST",
@@ -102,15 +133,20 @@ async function bootstrapJwt(): Promise<string> {
 		if (!res.ok) throw new Error(`bootstrap failed: ${res.status}`);
 		const data = await res.json();
 		if (!data.jwt) throw new Error("no jwt in response");
-		
+
 		cachedJwt = data.jwt;
-		jwtExpiresAt = Date.now() + 29 * 60 * 1000; // 29 min cache
+		jwtExpiresAt = parseJwtExp(data.jwt);
 		log("info", "mimo JWT obtained");
 		return data.jwt;
 	} catch (err) {
 		log("error", "mimo bootstrap failed", { error: String(err) });
 		throw err;
 	}
+}
+
+function resetJwtCache(): void {
+	cachedJwt = null;
+	jwtExpiresAt = 0;
 }
 
 // ── Health Check ───────────────────────────────────────────────────
@@ -219,7 +255,7 @@ function startProxy(overridePort?: number): http.Server {
 			
 			try {
 				parsedBody = JSON.parse(bodyStr);
-				if (parsedBody.model === "mimo-v2.5-free") {
+				if (parsedBody.model === "mimo-auto") {
 					isMimo = true;
 					log("info", `routing mimo-free: ${parsedBody.model}`);
 				}
@@ -230,18 +266,35 @@ function startProxy(overridePort?: number): http.Server {
 					// Mimo Free routing
 					const jwt = await bootstrapJwt();
 					const transformedBody = injectSystemMarker(parsedBody);
-					
-					const response = await fetch(MIMO_CHAT_URL, {
+
+					const mimoHeaders = {
+						"Content-Type": "application/json",
+						"Authorization": `Bearer ${jwt}`,
+						"X-Mimo-Source": "mimocode-cli-free",
+						"x-session-affinity": getSessionId(),
+						"Accept": "application/json",
+					};
+
+					let response = await fetch(MIMO_CHAT_URL, {
 						method: "POST",
-						headers: {
-							"Content-Type": "application/json",
-							"Authorization": `Bearer ${jwt}`,
-							"X-Mimo-Source": "mimocode-cli-free",
-						},
+						headers: mimoHeaders,
 						body: JSON.stringify(transformedBody),
 						signal: AbortSignal.timeout(30_000),
 					});
-					
+
+					// Retry once on auth failure (per 9router mimo-free.js:127-134)
+					if (response.status === 401 || response.status === 403) {
+						log("info", `mimo auth retry (${response.status}), re-bootstrapping...`);
+						resetJwtCache();
+						const retryJwt = await bootstrapJwt();
+						response = await fetch(MIMO_CHAT_URL, {
+							method: "POST",
+							headers: { ...mimoHeaders, "Authorization": `Bearer ${retryJwt}` },
+							body: JSON.stringify(transformedBody),
+							signal: AbortSignal.timeout(30_000),
+						});
+					}
+
 					const responseData = await response.text();
 					res.writeHead(response.status, { "content-type": "application/json" });
 					res.end(responseData);
