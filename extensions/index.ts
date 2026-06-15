@@ -51,6 +51,7 @@ interface ModelDef {
 // OpenCode models (existing)
 const KNOWN_MODELS: ModelDef[] = [
 	{ id: "deepseek-v4-flash-free", name: "DeepSeek V4 Flash", reasoning: true, contextWindow: 128_000, maxTokens: 16_384 },
+	{ id: "mimo-v2.5-free", name: "Mimo V2.5 Free", reasoning: false, contextWindow: 128_000, maxTokens: 16_384 },
 	{ id: "nemotron-3-ultra-free", name: "Nemotron 3 Ultra", reasoning: true, contextWindow: 128_000, maxTokens: 16_384 },
 	{ id: "north-mini-code-free", name: "North Mini Code", reasoning: true, contextWindow: 128_000, maxTokens: 16_384 },
 	{ id: "big-pickle", name: "Big Pickle", reasoning: true, contextWindow: 128_000, maxTokens: 16_384 },
