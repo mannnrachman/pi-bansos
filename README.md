@@ -1,6 +1,18 @@
 # pi-bansos
 
-Free model provider for pi. Uses a local proxy to bypass auth headers, allowing access to free-tier models from OpenCode Zen.
+Free model provider for **pi**. It adds a `bansos` provider with live free models from OpenCode Zen and Xiaomi MiMo Free through a local OpenAI-compatible proxy.
+
+## Why
+
+- No user API key required for supported free upstreams
+- Auto-checks model availability on every pi startup
+- Registers only models that are currently alive
+- Supports OpenCode free models and `mimo-auto`
+- Local-only proxy binds to `127.0.0.1`
+
+## Education & responsible use
+
+`pi-bansos` is made for learning how pi extensions, local proxies, OpenAI-compatible providers, and free-model routing work. Use it responsibly: respect upstream terms, avoid abuse or traffic flooding, and expect free access to change or stop anytime.
 
 ## Install
 
@@ -12,16 +24,18 @@ pi install npm:pi-bansos
 
 ```bash
 pi
-# /model → bansos → pick any free model
+# /model → bansos → choose a free model
 ```
 
-## How it works
+Optional custom port:
 
-1. Starts a local proxy that strips auth headers
-2. Fetches available models from upstream API
-3. Detects and verifies which models are free
-4. Registers them automatically via `pi.registerProvider()`
-5. Free models update on each pi restart — expired promos are removed
+```bash
+BANSOS_PORT=18081 pi
+```
+
+## Notes
+
+Free upstream models are best-effort: promos can expire, model IDs can change, and rate limits may apply. `pi-bansos` health-checks them at startup so unavailable models are skipped instead of registered.
 
 ## Uninstall
 

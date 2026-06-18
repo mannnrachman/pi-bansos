@@ -1,7 +1,7 @@
 {
 	"name": "pi-bansos",
-	"version": "0.1.4",
-	"description": "Free model provider for pi via OpenCode Zen",
+	"version": "0.2.0",
+	"description": "Free OpenAI-compatible model provider for pi via OpenCode Zen and MiMo Free",
 	"keywords": [
 		"pi-package",
 		"pi-extension",
