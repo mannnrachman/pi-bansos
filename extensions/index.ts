@@ -335,7 +335,9 @@ function startProxy(overridePort?: number): http.Server {
 					proxy.on("error", () => { res.writeHead(502, { "content-type": "application/json" }); res.end(JSON.stringify({ error: "upstream error" })); });
 					proxy.setTimeout(30_000, () => { proxy.destroy(new Error("timeout")); });
 					req.on("aborted", () => { if (!proxy.destroyed) proxy.destroy(); });
-					req.pipe(proxy);
+					// ponytail: body already buffered in bodyChunks above for model routing;
+					// req is drained so pipe() would send an empty body → upstream hang → 502.
+					proxy.end(Buffer.concat(bodyChunks));
 				}
 			} catch (err) {
 				log("error", "proxy error", { error: String(err) });
