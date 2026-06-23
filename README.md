@@ -1,6 +1,6 @@
 # pi-bansos
 
-Free model provider for **pi**. It adds a `bansos` provider with live free models from OpenCode Zen and Xiaomi MiMo Free through a local OpenAI-compatible proxy.
+Free model provider for [**pi**](https://pi.dev) ([browse packages](https://pi.dev/packages)). It adds a `bansos` provider with live free models from OpenCode Zen and Xiaomi MiMo Free through a local OpenAI-compatible proxy.
 
 ## Why
 
@@ -15,6 +15,8 @@ Free model provider for **pi**. It adds a `bansos` provider with live free model
 `pi-bansos` is made for learning how pi extensions, local proxies, OpenAI-compatible providers, and free-model routing work. Use it responsibly: respect upstream terms, avoid abuse or traffic flooding, and expect free access to change or stop anytime.
 
 ## Install
+
+Requires [pi](https://pi.dev/docs/latest/quickstart).
 
 ```bash
 pi install npm:pi-bansos
@@ -40,7 +42,7 @@ Free upstream models are best-effort: promos can expire, model IDs can change, a
 ## Uninstall
 
 ```bash
-pi remove pi-bansos
+pi remove npm:pi-bansos
 ```
 
 ## License
