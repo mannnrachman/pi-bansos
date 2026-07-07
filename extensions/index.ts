@@ -1,7 +1,7 @@
 /**
- * bansos — pi extension (with mimo-free support)
+ * bansos — pi extension (with mimo-free + kilo free support)
  *
- * OpenCode models + Mimo Free from xiaomi
+ * OpenCode models + Mimo Free (xiaomi) + KiloCode gateway free models
  */
 import http from "node:http";
 import https from "node:https";
@@ -14,6 +14,8 @@ import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 const UPSTREAM_OPENCODE = "https://opencode.ai/zen";
 const MIMO_CHAT_URL = "https://api.xiaomimimo.com/api/free-ai/openai/chat";
 const MIMO_BOOTSTRAP_URL = "https://api.xiaomimimo.com/api/free-ai/bootstrap";
+// KiloCode gateway — OpenAI-compatible; free models are keyless (200 req/hr per IP)
+const KILO_CHAT_URL = "https://api.kilo.ai/api/gateway/chat/completions";
 const PORT = Number(process.env.BANSOS_PORT) || 18080;
 const HOST = "127.0.0.1";
 const API = `${UPSTREAM_OPENCODE}/v1`;
@@ -47,22 +49,39 @@ interface ModelDef {
 	reasoning: boolean;
 	contextWindow: number;
 	maxTokens: number;
+	thinkingFormat?: "openrouter";
 }
 
-// OpenCode models (existing)
+// OpenCode models (existing) — factual specs from model docs / models.dev / gateway
 const KNOWN_MODELS: ModelDef[] = [
-	{ id: "deepseek-v4-flash-free", name: "DeepSeek V4 Flash", reasoning: true, contextWindow: 128_000, maxTokens: 16_384 },
-	{ id: "mimo-v2.5-free", name: "Mimo V2.5 Free", reasoning: false, contextWindow: 128_000, maxTokens: 16_384 },
-	{ id: "nemotron-3-ultra-free", name: "Nemotron 3 Ultra", reasoning: true, contextWindow: 128_000, maxTokens: 16_384 },
-	{ id: "north-mini-code-free", name: "North Mini Code", reasoning: true, contextWindow: 128_000, maxTokens: 16_384 },
-	{ id: "big-pickle", name: "Big Pickle", reasoning: true, contextWindow: 128_000, maxTokens: 16_384 },
+	{ id: "deepseek-v4-flash-free", name: "DeepSeek V4 Flash", reasoning: true, contextWindow: 1_000_000, maxTokens: 384_000 },
+	{ id: "mimo-v2.5-free", name: "Mimo V2.5 Free", reasoning: false, contextWindow: 1_048_576, maxTokens: 131_072 },
+	{ id: "nemotron-3-ultra-free", name: "Nemotron 3 Ultra", reasoning: true, contextWindow: 1_000_000, maxTokens: 65_536 },
+	{ id: "north-mini-code-free", name: "North Mini Code", reasoning: true, contextWindow: 256_000, maxTokens: 64_000 },
+	{ id: "big-pickle", name: "Big Pickle", reasoning: true, contextWindow: 200_000, maxTokens: 32_000 },
 ];
 
-// Mimo Free models (from xiaomi free API)
+// Mimo Free models (from xiaomi free API) — MiMo V2.5: 1M ctx, 128K out
 // Per 9router/open-sse/config/providerModels.js: "free channel only serves mimo-auto"
 const MIMO_MODELS: ModelDef[] = [
-	{ id: "mimo-auto", name: "MiMo Auto (Free)", reasoning: false, contextWindow: 128_000, maxTokens: 16_384 },
+	{ id: "mimo-auto", name: "MiMo Auto (Free)", reasoning: false, contextWindow: 1_048_576, maxTokens: 131_072 },
 ];
+
+// KiloCode gateway free models (keyless — https://kilo.ai/docs/gateway)
+const KILO_MODELS: ModelDef[] = [
+	{ id: "kilo-auto/free", name: "Kilo Auto Free", reasoning: false, contextWindow: 256_000, maxTokens: 10_000 },
+	{ id: "tencent/hy3:free", name: "Hy3 Free (Kilo)", reasoning: true, contextWindow: 262_144, maxTokens: 262_144, thinkingFormat: "openrouter" },
+	{ id: "stepfun/step-3.7-flash:free", name: "Step 3.7 Flash Free", reasoning: false, contextWindow: 262_144, maxTokens: 262_144 },
+	{ id: "nvidia/nemotron-3-ultra-550b-a55b:free", name: "Nemotron 3 Ultra Free", reasoning: true, contextWindow: 1_000_000, maxTokens: 65_536, thinkingFormat: "openrouter" },
+	// ponytail: nemotron-super emits output in `reasoning` field (not `content`) under pi's payload → renders blank in agent use; gateway-direct works. Left registered, known-broken via pi until upstream changes.
+	{ id: "nvidia/nemotron-3-super-120b-a12b:free", name: "Nemotron 3 Super Free", reasoning: true, contextWindow: 1_000_000, maxTokens: 262_144, thinkingFormat: "openrouter" },
+	{ id: "poolside/laguna-m.1:free", name: "Laguna M.1 Free", reasoning: false, contextWindow: 262_144, maxTokens: 32_768 },
+	{ id: "cohere/north-mini-code:free", name: "North Mini Code Free", reasoning: false, contextWindow: 256_000, maxTokens: 64_000 },
+	{ id: "poolside/laguna-xs-2.1:free", name: "Laguna XS 2.1 Free", reasoning: false, contextWindow: 262_144, maxTokens: 32_768 },
+	{ id: "nvidia/nemotron-3-nano-omni-30b-a3b-reasoning:free", name: "Nemotron 3 Nano Omni Free", reasoning: true, contextWindow: 256_000, maxTokens: 65_536, thinkingFormat: "openrouter" },
+	{ id: "openrouter/free", name: "OpenRouter Free (auto)", reasoning: false, contextWindow: 200_000, maxTokens: 65_536 },
+];
+const KILO_MODEL_IDS = new Set(KILO_MODELS.map((m) => m.id));
 
 // ── Whitelists ─────────────────────────────────────────────────────
 const ALLOWED_PATH_PATTERN = /^\/v1\/[a-zA-Z0-9/_.,\-?&=]*$/;
@@ -88,7 +107,6 @@ function log(level: LogLevel, message: string, meta?: Record<string, unknown>) {
 const rateLimitMap = new Map<string, { count: number; resetAt: number }>();
 const RATE_LIMIT_WINDOW_MS = 60_000;
 const RATE_LIMIT_MAX = 120;
-let cleanupInterval: ReturnType<typeof setInterval> | null = null;
 
 function checkRateLimit(ip: string): boolean {
 	const now = Date.now();
@@ -171,6 +189,21 @@ async function checkModelAlive(id: string, isMimo = false): Promise<boolean> {
 	}
 }
 
+// KiloCode gateway health check (free models are keyless — placeholder bearer)
+async function checkKiloAlive(id: string): Promise<boolean> {
+	try {
+		const res = await fetch(KILO_CHAT_URL, {
+			method: "POST",
+			headers: { "content-type": "application/json", "Authorization": "Bearer kilo-free" },
+			body: JSON.stringify({ model: id, messages: [{ role: "user", content: "hi" }], max_tokens: 1, stream: false }),
+			signal: AbortSignal.timeout(10_000),
+		});
+		return res.ok;
+	} catch {
+		return false;
+	}
+}
+
 // ── Helpers ────────────────────────────────────────────────────────
 function getClientIP(req: http.IncomingMessage): string {
 	const addr = req.socket.remoteAddress;
@@ -214,12 +247,11 @@ function injectSystemMarker(body: any): any {
 }
 
 // ── Start local proxy ──────────────────────────────────────────────
-function startProxy(overridePort?: number): http.Server {
+function startProxy(overridePort?: number): Promise<http.Server> {
 	const effectivePort = overridePort ?? PORT;
 
 	const server = http.createServer((req, res) => {
 		const clientIP = getClientIP(req);
-		const startTime = Date.now();
 
 		if (!checkRateLimit(clientIP)) {
 			log("warn", "rate limit exceeded", { ip: clientIP });
@@ -253,12 +285,15 @@ function startProxy(overridePort?: number): http.Server {
 		req.on("end", async () => {
 			const bodyStr = Buffer.concat(bodyChunks).toString();
 			let isMimo = false;
+			let isKilo = false;
 			let parsedBody: any = null;
 			
 			try {
 				parsedBody = JSON.parse(bodyStr);
 				if (parsedBody.model === "mimo-auto") {
 					isMimo = true;
+				} else if (typeof parsedBody.model === "string" && KILO_MODEL_IDS.has(parsedBody.model)) {
+					isKilo = true;
 				}
 			} catch {}
 
@@ -313,6 +348,32 @@ function startProxy(overridePort?: number): http.Server {
 						res.writeHead(response.status, { "content-type": ct });
 						res.end(data);
 					}
+				} else if (isKilo) {
+					// KiloCode gateway routing (free models are keyless)
+					const isStream = parsedBody.stream === true;
+					const response = await fetch(KILO_CHAT_URL, {
+						method: "POST",
+						headers: { "Content-Type": "application/json", "Authorization": "Bearer kilo-free" },
+						body: JSON.stringify(parsedBody),
+						signal: AbortSignal.timeout(60_000),
+					});
+					if (isStream && response.body) {
+						const ct = response.headers.get("content-type") || "text/event-stream";
+						res.writeHead(response.status, {
+							"content-type": ct,
+							"cache-control": "no-cache",
+							"x-accel-buffering": "no",
+						});
+						const nodeStream = Readable.fromWeb(response.body as unknown as import("stream/web").ReadableStream);
+						nodeStream.pipe(res);
+						req.on("aborted", () => { if (!nodeStream.destroyed) nodeStream.destroy(); });
+						req.on("close", () => { if (!nodeStream.destroyed) nodeStream.destroy(); });
+					} else {
+						const data = await response.text();
+						const ct = response.headers.get("content-type") || "application/json";
+						res.writeHead(response.status, { "content-type": ct });
+						res.end(data);
+					}
 				} else {
 					// OpenCode routing (existing)
 					const fwd = sanitizeHeaders(req.headers, target.hostname);
@@ -347,20 +408,33 @@ function startProxy(overridePort?: number): http.Server {
 		});
 	});
 
-	server.on("error", (err: NodeJS.ErrnoException) => {
-		if (err.code === "EADDRINUSE") { log("warn", `port ${effectivePort} in use`); return; }
-		log("error", "server error", { code: err.code, message: err.message });
+	return new Promise((resolve, reject) => {
+		server.on("error", (err: NodeJS.ErrnoException) => {
+			if (err.code === "EADDRINUSE") {
+				log("error", `port ${effectivePort} in use — stale bansos proxy? kill it (lsof -i :${effectivePort}) or set BANSOS_PORT. not registering.`);
+				reject(err);
+				return;
+			}
+			log("error", "server error", { code: err.code, message: err.message });
+			reject(err);
+		});
+		server.listen(effectivePort, HOST, () => {
+			log("info", `proxy listening on http://${HOST}:${effectivePort}`);
+			resolve(server);
+		});
 	});
-
-	server.listen(effectivePort, HOST);
-	log("info", `proxy listening on http://${HOST}:${effectivePort}`);
-	return server;
 }
 
 // ── Main extension ─────────────────────────────────────────────────
 export default async function (pi: ExtensionAPI) {
 	log("info", "extension loading...");
-	const server = startProxy();
+	let server: http.Server;
+	try {
+		server = await startProxy();
+	} catch {
+		log("error", "extension inactive — could not bind proxy port. resolve the port conflict and restart pi.");
+		return;
+	}
 
 	// Health check opencode models
 	log("info", `checking ${KNOWN_MODELS.length} opencode model(s)...`);
@@ -369,7 +443,7 @@ export default async function (pi: ExtensionAPI) {
 			const alive = await checkModelAlive(model.id, false);
 			if (alive) log("info", `✓ ${model.id} is alive`);
 			else log("warn", `✗ ${model.id} is dead — skipping`);
-			return { ...model, alive };
+			return { ...model, alive, source: "opencode" as const };
 		}),
 	);
 
@@ -380,11 +454,22 @@ export default async function (pi: ExtensionAPI) {
 			const alive = await checkModelAlive(model.id, true);
 			if (alive) log("info", `✓ ${model.id} (mimo-free) is alive`);
 			else log("warn", `✗ ${model.id} (mimo-free) is dead — skipping`);
-			return { ...model, alive };
+			return { ...model, alive, source: "mimo" as const };
 		}),
 	);
 
-	const aliveModels = [...opencodeChecks, ...mimoChecks].filter((m) => m.alive);
+	// Health check kilo models
+	log("info", `checking ${KILO_MODELS.length} kilo model(s)...`);
+	const kiloChecks = await Promise.all(
+		KILO_MODELS.map(async (model) => {
+			const alive = await checkKiloAlive(model.id);
+			if (alive) log("info", `✓ ${model.id} (kilo) is alive`);
+			else log("warn", `✗ ${model.id} (kilo) is dead — skipping`);
+			return { ...model, alive, source: "kilo" as const };
+		}),
+	);
+
+	const aliveModels = [...opencodeChecks, ...mimoChecks, ...kiloChecks].filter((m) => m.alive);
 
 	if (aliveModels.length === 0) {
 		log("warn", "no alive models found — extension inactive");
@@ -397,7 +482,7 @@ export default async function (pi: ExtensionAPI) {
 		baseUrl: `http://${HOST}:${PORT}/v1`,
 		apiKey: "placeholder",
 		api: "openai-completions",
-		compat: { supportsDeveloperRole: false, supportsReasoningEffort: true },
+		compat: { supportsDeveloperRole: false },
 		models: aliveModels.map((m) => ({
 			id: m.id,
 			name: m.name,
@@ -406,7 +491,11 @@ export default async function (pi: ExtensionAPI) {
 			contextWindow: m.contextWindow,
 			maxTokens: m.maxTokens,
 			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
-			compat: { supportsDeveloperRole: false, supportsReasoningEffort: true },
+			compat: m.thinkingFormat
+				? { supportsDeveloperRole: false, thinkingFormat: m.thinkingFormat }
+				: m.source === "kilo"
+					? { supportsDeveloperRole: false, supportsReasoningEffort: false }
+					: { supportsDeveloperRole: false, supportsReasoningEffort: true },
 		})),
 	});
 
@@ -414,7 +503,6 @@ export default async function (pi: ExtensionAPI) {
 		log("info", "shutting down proxy...");
 		server.close();
 		rateLimitMap.clear();
-		if (cleanupInterval) { clearInterval(cleanupInterval); cleanupInterval = null; }
 		log("info", "shutdown complete");
 	});
 }
