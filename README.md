@@ -1,13 +1,13 @@
 # pi-bansos
 
-Free model provider for [**pi**](https://pi.dev) ([browse packages](https://pi.dev/packages)). It adds a `bansos` provider with live free models from OpenCode Zen and Xiaomi MiMo Free through a local OpenAI-compatible proxy.
+Free model provider for [**pi**](https://pi.dev) ([browse packages](https://pi.dev/packages)). It adds a `bansos` provider with live free models from OpenCode Zen, Xiaomi MiMo Free, and the KiloCode gateway through a local OpenAI-compatible proxy.
 
 ## Why
 
 - No user API key required for supported free upstreams
 - Auto-checks model availability on every pi startup
 - Registers only models that are currently alive
-- Supports OpenCode free models and `mimo-auto`
+- Supports OpenCode free models, `mimo-auto`, and KiloCode gateway free models (keyless, 200 req/hr per IP)
 - Local-only proxy binds to `127.0.0.1`
 
 ## Education & responsible use
