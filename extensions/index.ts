@@ -247,8 +247,8 @@ function injectSystemMarker(body: any): any {
 }
 
 // ── Start local proxy ──────────────────────────────────────────────
-function startProxy(overridePort?: number): Promise<http.Server> {
-	const effectivePort = overridePort ?? PORT;
+function startProxy(overridePort?: number): Promise<{ server: http.Server; port: number }> {
+	const basePort = overridePort ?? PORT;
 
 	const server = http.createServer((req, res) => {
 		const clientIP = getClientIP(req);
@@ -409,19 +409,35 @@ function startProxy(overridePort?: number): Promise<http.Server> {
 	});
 
 	return new Promise((resolve, reject) => {
-		server.on("error", (err: NodeJS.ErrnoException) => {
-			if (err.code === "EADDRINUSE") {
-				log("error", `port ${effectivePort} in use — stale bansos proxy? kill it (lsof -i :${effectivePort}) or set BANSOS_PORT. not registering.`);
+		// ponytail: auto-bump to next free port so multiple pi sessions on one
+		// machine don't fight over 18080. cap at 20 to avoid infinite scan.
+		// use server.address() for the real port: a failed listen()'s callback
+		// still fires on the next successful listen, so the closure `port` is stale.
+		let attempt = 0;
+		let settled = false;
+		const tryListen = (port: number) => {
+			server.once("error", (err: NodeJS.ErrnoException) => {
+				if (settled) return;
+				if (err.code === "EADDRINUSE" && attempt < 20) {
+					attempt++;
+					log("warn", `port ${port} taken — trying ${port + 1}`);
+					tryListen(port + 1);
+					return;
+				}
+				settled = true;
+				log("error", "server error", { code: err.code, message: err.message });
 				reject(err);
-				return;
-			}
-			log("error", "server error", { code: err.code, message: err.message });
-			reject(err);
-		});
-		server.listen(effectivePort, HOST, () => {
-			log("info", `proxy listening on http://${HOST}:${effectivePort}`);
-			resolve(server);
-		});
+			});
+			server.listen(port, HOST, () => {
+				if (settled) return;
+				settled = true;
+				const addr = server.address();
+				const realPort = addr && typeof addr === "object" ? addr.port : port;
+				log("info", `proxy listening on http://${HOST}:${realPort}`);
+				resolve({ server, port: realPort });
+			});
+		};
+		tryListen(basePort);
 	});
 }
 
@@ -429,8 +445,11 @@ function startProxy(overridePort?: number): Promise<http.Server> {
 export default async function (pi: ExtensionAPI) {
 	log("info", "extension loading...");
 	let server: http.Server;
+	let actualPort: number;
 	try {
-		server = await startProxy();
+		const r = await startProxy();
+		server = r.server;
+		actualPort = r.port;
 	} catch {
 		log("error", "extension inactive — could not bind proxy port. resolve the port conflict and restart pi.");
 		return;
@@ -479,7 +498,7 @@ export default async function (pi: ExtensionAPI) {
 	log("info", `${aliveModels.length} model(s) registered: ${aliveModels.map((m) => m.id).join(", ")}`);
 
 	pi.registerProvider("bansos", {
-		baseUrl: `http://${HOST}:${PORT}/v1`,
+		baseUrl: `http://${HOST}:${actualPort}/v1`,
 		apiKey: "placeholder",
 		api: "openai-completions",
 		compat: { supportsDeveloperRole: false },
