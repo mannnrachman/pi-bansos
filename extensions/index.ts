@@ -246,6 +246,22 @@ function injectSystemMarker(body: any): any {
 	return { ...body, messages: [{ role: "system", content: MIMO_SYSTEM_MARKER }, ...messages] };
 }
 
+// ponytail: shared stream pipe — upstream abort/timeout must end response,
+// not become an uncaught exception that crashes pi.
+function pipeUpstreamStream(nodeStream: Readable, res: http.ServerResponse, req: http.IncomingMessage): void {
+	nodeStream.on("error", (e: unknown) => {
+		log("error", "upstream stream error", { error: String(e) });
+		try {
+			const canSendError = !res.headersSent;
+			if (canSendError) res.writeHead(502, { "content-type": "application/json" });
+			res.end(canSendError ? JSON.stringify({ error: "upstream stream error" }) : undefined);
+		} catch {}
+	});
+	nodeStream.pipe(res);
+	req.on("aborted", () => { if (!nodeStream.destroyed) nodeStream.destroy(); });
+	req.on("close", () => { if (!nodeStream.destroyed) nodeStream.destroy(); });
+}
+
 // ── Start local proxy ──────────────────────────────────────────────
 function startProxy(overridePort?: number): Promise<{ server: http.Server; port: number }> {
 	const basePort = overridePort ?? PORT;
@@ -317,7 +333,7 @@ function startProxy(overridePort?: number): Promise<{ server: http.Server; port:
 							method: "POST",
 							headers: buildHeaders(token),
 							body: JSON.stringify(transformedBody),
-							signal: AbortSignal.timeout(60_000),
+							signal: AbortSignal.timeout(300_000),
 						});
 
 					let response = await doFetch(jwt);
@@ -338,10 +354,7 @@ function startProxy(overridePort?: number): Promise<{ server: http.Server; port:
 							"cache-control": "no-cache",
 							"x-accel-buffering": "no",
 						});
-						const nodeStream = Readable.fromWeb(response.body as unknown as import("stream/web").ReadableStream);
-						nodeStream.pipe(res);
-						req.on("aborted", () => { if (!nodeStream.destroyed) nodeStream.destroy(); });
-						req.on("close", () => { if (!nodeStream.destroyed) nodeStream.destroy(); });
+						pipeUpstreamStream(Readable.fromWeb(response.body as unknown as import("stream/web").ReadableStream), res, req);
 					} else {
 						const data = await response.text();
 						const ct = response.headers.get("content-type") || "application/json";
@@ -355,7 +368,7 @@ function startProxy(overridePort?: number): Promise<{ server: http.Server; port:
 						method: "POST",
 						headers: { "Content-Type": "application/json", "Authorization": "Bearer kilo-free" },
 						body: JSON.stringify(parsedBody),
-						signal: AbortSignal.timeout(60_000),
+						signal: AbortSignal.timeout(300_000),
 					});
 					if (isStream && response.body) {
 						const ct = response.headers.get("content-type") || "text/event-stream";
@@ -364,10 +377,7 @@ function startProxy(overridePort?: number): Promise<{ server: http.Server; port:
 							"cache-control": "no-cache",
 							"x-accel-buffering": "no",
 						});
-						const nodeStream = Readable.fromWeb(response.body as unknown as import("stream/web").ReadableStream);
-						nodeStream.pipe(res);
-						req.on("aborted", () => { if (!nodeStream.destroyed) nodeStream.destroy(); });
-						req.on("close", () => { if (!nodeStream.destroyed) nodeStream.destroy(); });
+						pipeUpstreamStream(Readable.fromWeb(response.body as unknown as import("stream/web").ReadableStream), res, req);
 					} else {
 						const data = await response.text();
 						const ct = response.headers.get("content-type") || "application/json";
