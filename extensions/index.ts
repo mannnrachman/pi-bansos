@@ -5,6 +5,9 @@
  */
 import http from "node:http";
 import https from "node:https";
+import fs from "node:fs";
+import path from "node:path";
+import { fileURLToPath } from "node:url";
 import { Readable } from "node:stream";
 import { createHash } from "node:crypto";
 import os from "node:os";
@@ -20,6 +23,135 @@ const PORT = Number(process.env.BANSOS_PORT) || 18080;
 const HOST = "127.0.0.1";
 const API = `${UPSTREAM_OPENCODE}/v1`;
 const MIMO_SYSTEM_MARKER = "You are MiMoCode, an interactive CLI tool that helps users with software engineering tasks.";
+
+// ── Relay egress (vercel/cloudflare worker, x-relay-target pattern) ──────────
+// Same logic as 9router ProxyFetch: when enabled, redirect upstream calls to a
+// relay URL and inject x-relay-target / x-relay-path headers. Body untouched →
+// SSE streaming passes through unchanged. Toggle live via /bansos command.
+// No built-in default relay — a published package must not bake in any one
+// user's personal relay URL. Bring your own via /bansos deploy or /bansos url.
+const DEFAULT_RELAY_URL = "";
+// State lives at the package root (parent of this extensions/ dir) — NOT under
+// extensions/ (which is in package.json "files" and would get published). Resolved
+// at runtime from the module's own location, so it works in dev and when installed.
+const RELAY_STATE_FILE = path.join(path.dirname(fileURLToPath(import.meta.url)), "..", ".relay-state.json");
+
+type KnownRelay = { url: string; label?: string; addedAt?: string };
+type RelayState = { enabled: boolean; url: string; relays: KnownRelay[] };
+function loadRelayState(): RelayState {
+	try {
+		const s = JSON.parse(fs.readFileSync(RELAY_STATE_FILE, "utf8"));
+		const relays: KnownRelay[] = Array.isArray(s?.relays) ? s.relays : [];
+		return { enabled: Boolean(s?.enabled), url: typeof s?.url === "string" ? s.url.trim() : "", relays };
+	} catch { return { enabled: false, url: "", relays: [] }; }
+}
+function saveRelayState(s: RelayState): void {
+	try { fs.writeFileSync(RELAY_STATE_FILE, JSON.stringify(s)); }
+	catch (e) { log("warn", "could not persist relay state", { error: String(e) }); }
+}
+// dedupe-add a relay to the known list
+function ensureRelay(s: RelayState, url: string, label?: string): void {
+	if (!url || s.relays.some((r) => r.url === url)) return;
+	s.relays.push({ url, label, addedAt: new Date().toISOString() });
+}
+function removeRelay(s: RelayState, url: string): void {
+	s.relays = s.relays.filter((r) => r.url !== url);
+}
+function resolveRelayState(): RelayState {
+	const s = loadRelayState();
+	// migrate legacy {enabled,url}: seed the known list with default + active url
+	if (!s.relays.length) {
+		ensureRelay(s, DEFAULT_RELAY_URL, "9Router default");
+		if (s.url && s.url !== DEFAULT_RELAY_URL) ensureRelay(s, s.url, "previous");
+	}
+	if (!s.url) s.url = DEFAULT_RELAY_URL;
+	return s;
+}
+let relayState: RelayState = resolveRelayState();
+let relayHits = 0;
+
+// Catalog served at GET /v1/models — ONLY the alive free models we register.
+// Set after health checks. Prevents paid/other upstream models from leaking
+// through the proxy's /v1/models (opencode returns 60 models incl. 54 paid).
+let aliveCatalog: ModelDef[] = [];
+
+// Relay-aware fetch. Direct when disabled; otherwise POST to relay URL with the
+// two relay headers. Falls back to direct on relay error (non-strict).
+async function relayFetch(url: string, opts: RequestInit = {}): Promise<Response> {
+	if (!relayState.enabled || !relayState.url) return fetch(url, opts);
+	try {
+		const u = new URL(url);
+		relayHits++;
+		const headers = new Headers(opts.headers);
+		headers.set("x-relay-target", `${u.protocol}//${u.host}`);
+		headers.set("x-relay-path", `${u.pathname}${u.search}`);
+		return await fetch(relayState.url, { ...opts, headers });
+	} catch (e) {
+		log("warn", "relay fetch failed, falling back to direct", { url, error: String(e) });
+		return fetch(url, opts);
+	}
+}
+
+// ── Deploy a fresh Vercel relay (same flow as 9Router) ───────────────────────
+// Token is used in-memory only and NEVER persisted. Resulting URL is saved to
+// the relay state and activated. Worker uses the x-relay-target/x-relay-path
+// pattern, identical to the cloudflare/vercel relays 9Router deploys.
+const VERCEL_API = "https://api.vercel.com";
+const VERCEL_RELAY_WORKER = `// Only the 3 upstreams pi-bansos talks to. Anything else = open proxy abuse.
+const ALLOWED_TARGETS = ["https://opencode.ai", "https://api.xiaomimimo.com", "https://api.kilo.ai"];
+export const config = { runtime: "edge" };
+export default async function handler(req) {
+  const target = req.headers.get("x-relay-target");
+  const relayPath = req.headers.get("x-relay-path") || "/";
+  if (!target) return new Response(JSON.stringify({ error: "Missing x-relay-target header" }), { status: 400, headers: { "content-type": "application/json" } });
+  const cleanTarget = target.replace(/\\/$/, "");
+  if (!ALLOWED_TARGETS.includes(cleanTarget)) return new Response(JSON.stringify({ error: "Forbidden target" }), { status: 403, headers: { "content-type": "application/json" } });
+  if (!relayPath.startsWith("/")) return new Response(JSON.stringify({ error: "Bad path" }), { status: 400, headers: { "content-type": "application/json" } });
+  const targetUrl = cleanTarget + relayPath;
+  const headers = new Headers(req.headers);
+  headers.delete("x-relay-target"); headers.delete("x-relay-path"); headers.delete("host");
+  const response = await fetch(targetUrl, { method: req.method, headers, body: req.method !== "GET" && req.method !== "HEAD" ? req.body : undefined, duplex: "half" });
+  return new Response(response.body, { status: response.status, headers: response.headers });
+}`;
+
+async function deployVercelRelay(token: string, name: string, onProgress?: (msg: string) => void): Promise<string> {
+	const auth = { Authorization: `Bearer ${token}`, "Content-Type": "application/json" };
+	// 1. create deployment (3 inline files, no git repo)
+	onProgress?.("Uploading relay to Vercel…");
+	const dep = await fetch(`${VERCEL_API}/v13/deployments`, {
+		method: "POST", headers: auth,
+		body: JSON.stringify({
+			name,
+			files: [
+				{ file: "api/relay.js", data: VERCEL_RELAY_WORKER },
+				{ file: "package.json", data: JSON.stringify({ name, version: "1.0.0" }) },
+				{ file: "vercel.json", data: JSON.stringify({ rewrites: [{ source: "/(.*)", destination: "/api/relay" }] }) },
+			],
+			projectSettings: { framework: null },
+			target: "production",
+		}),
+	});
+	if (!dep.ok) {
+		const e = await dep.json().catch(() => ({}) as { error?: { message?: string } });
+		throw new Error(e?.error?.message || `Vercel deploy failed (HTTP ${dep.status})`);
+	}
+	const depJson = await dep.json();
+	const depId = depJson.id || depJson.uid;
+	const projectId = depJson.projectId || name;
+	// 2. make the deployment public (disable SSO protection)
+	await fetch(`${VERCEL_API}/v9/projects/${projectId}`, { method: "PATCH", headers: auth, body: JSON.stringify({ ssoProtection: null }) });
+	// 3. poll until READY (3s interval, 120s timeout — same as 9Router)
+	onProgress?.("Waiting for deployment to go live…");
+	const deadline = Date.now() + 120_000;
+	while (Date.now() < deadline) {
+		const s = await fetch(`${VERCEL_API}/v13/deployments/${depId}`, { headers: { Authorization: `Bearer ${token}` } });
+		const j = await s.json();
+		if (j.readyState === "READY") return `https://${j.url}`;
+		if (j.readyState === "ERROR" || j.readyState === "CANCELED") throw new Error(`Deployment failed: ${j.readyState}`);
+		await new Promise((r) => setTimeout(r, 3000));
+	}
+	throw new Error("Deployment timed out (120s)");
+}
 
 // Session affinity (per 9router mimo-free.js) — Xiaomi uses this for rate limit / anti-abuse
 const SESSION_AFFINITY_PREFIX = "ses_";
@@ -59,6 +191,8 @@ const KNOWN_MODELS: ModelDef[] = [
 	{ id: "nemotron-3-ultra-free", name: "Nemotron 3 Ultra", reasoning: true, contextWindow: 1_000_000, maxTokens: 65_536 },
 	{ id: "north-mini-code-free", name: "North Mini Code", reasoning: true, contextWindow: 256_000, maxTokens: 64_000 },
 	{ id: "big-pickle", name: "Big Pickle", reasoning: true, contextWindow: 200_000, maxTokens: 32_000 },
+	{ id: "ling-3.0-flash-free", name: "Ling 3.0 Flash", reasoning: true, contextWindow: 262_144, maxTokens: 32_768 },
+	{ id: "laguna-s-2.1-free", name: "Laguna S 2.1", reasoning: true, contextWindow: 262_144, maxTokens: 32_768 },
 ];
 
 // Mimo Free models (from xiaomi free API) — MiMo V2.5: 1M ctx, 128K out
@@ -70,7 +204,6 @@ const MIMO_MODELS: ModelDef[] = [
 // KiloCode gateway free models (keyless — https://kilo.ai/docs/gateway)
 const KILO_MODELS: ModelDef[] = [
 	{ id: "kilo-auto/free", name: "Kilo Auto Free", reasoning: false, contextWindow: 256_000, maxTokens: 10_000 },
-	{ id: "tencent/hy3:free", name: "Hy3 Free (Kilo)", reasoning: true, contextWindow: 262_144, maxTokens: 262_144, thinkingFormat: "openrouter" },
 	{ id: "stepfun/step-3.7-flash:free", name: "Step 3.7 Flash Free", reasoning: false, contextWindow: 262_144, maxTokens: 262_144 },
 	{ id: "nvidia/nemotron-3-ultra-550b-a55b:free", name: "Nemotron 3 Ultra Free", reasoning: true, contextWindow: 1_000_000, maxTokens: 65_536, thinkingFormat: "openrouter" },
 	// ponytail: nemotron-super emits output in `reasoning` field (not `content`) under pi's payload → renders blank in agent use; gateway-direct works. Left registered, known-broken via pi until upstream changes.
@@ -144,7 +277,7 @@ async function bootstrapJwt(): Promise<string> {
 	if (cachedJwt && Date.now() < jwtExpiresAt - JWT_EXPIRY_BUFFER_MS) return cachedJwt;
 
 	try {
-		const res = await fetch(MIMO_BOOTSTRAP_URL, {
+		const res = await relayFetch(MIMO_BOOTSTRAP_URL, {
 			method: "POST",
 			headers: { "content-type": "application/json" },
 			body: JSON.stringify({ client: generateFingerprint() }),
@@ -177,7 +310,7 @@ async function checkModelAlive(id: string, isMimo = false): Promise<boolean> {
 			await bootstrapJwt();
 			return true;
 		}
-		const res = await fetch(`${API}/chat/completions`, {
+		const res = await relayFetch(`${API}/chat/completions`, {
 			method: "POST",
 			headers: { "content-type": "application/json" },
 			body: JSON.stringify({ model: id, messages: [{ role: "user", content: "hi" }], max_tokens: 1, stream: false }),
@@ -192,7 +325,7 @@ async function checkModelAlive(id: string, isMimo = false): Promise<boolean> {
 // KiloCode gateway health check (free models are keyless — placeholder bearer)
 async function checkKiloAlive(id: string): Promise<boolean> {
 	try {
-		const res = await fetch(KILO_CHAT_URL, {
+		const res = await relayFetch(KILO_CHAT_URL, {
 			method: "POST",
 			headers: { "content-type": "application/json", "Authorization": "Bearer kilo-free" },
 			body: JSON.stringify({ model: id, messages: [{ role: "user", content: "hi" }], max_tokens: 1, stream: false }),
@@ -288,6 +421,15 @@ function startProxy(overridePort?: number): Promise<{ server: http.Server; port:
 			return;
 		}
 
+		// Serve ONLY our registered free models. Never forward /v1/models to
+		// upstream (that would leak ~54 paid models into the picker).
+		if (req.method === "GET" && (req.url === "/v1/models" || req.url === "/v1/models/")) {
+			const body = JSON.stringify({ object: "list", data: aliveCatalog.map((m) => ({ id: m.id, object: "model", created: 0, owned_by: "bansos" })) });
+			res.writeHead(200, { "content-type": "application/json", "content-length": Buffer.byteLength(body) });
+			res.end(body);
+			return;
+		}
+
 		const target = validatePath(req.url ?? "/");
 		if (!target) {
 			res.writeHead(403, { "content-type": "application/json" });
@@ -329,7 +471,7 @@ function startProxy(overridePort?: number): Promise<{ server: http.Server; port:
 					});
 
 					const doFetch = (token: string) =>
-						fetch(MIMO_CHAT_URL, {
+						relayFetch(MIMO_CHAT_URL, {
 							method: "POST",
 							headers: buildHeaders(token),
 							body: JSON.stringify(transformedBody),
@@ -364,7 +506,7 @@ function startProxy(overridePort?: number): Promise<{ server: http.Server; port:
 				} else if (isKilo) {
 					// KiloCode gateway routing (free models are keyless)
 					const isStream = parsedBody.stream === true;
-					const response = await fetch(KILO_CHAT_URL, {
+					const response = await relayFetch(KILO_CHAT_URL, {
 						method: "POST",
 						headers: { "Content-Type": "application/json", "Authorization": "Bearer kilo-free" },
 						body: JSON.stringify(parsedBody),
@@ -385,7 +527,33 @@ function startProxy(overridePort?: number): Promise<{ server: http.Server; port:
 						res.end(data);
 					}
 				} else {
-					// OpenCode routing (existing)
+					// OpenCode routing — relay (fetch-based) when enabled, else direct (existing, untouched)
+					if (relayState.enabled && relayState.url) {
+						const fullUrl = `${UPSTREAM_OPENCODE}${req.url ?? "/"}`;
+						const relayHeaders = sanitizeHeaders(req.headers, new URL(relayState.url).host);
+						try {
+							const response = await relayFetch(fullUrl, {
+								method: req.method || "POST",
+								headers: relayHeaders,
+								body: bodyChunks.length ? Buffer.concat(bodyChunks) : undefined,
+								signal: AbortSignal.timeout(300_000),
+							});
+							const ct = response.headers.get("content-type") || "application/json";
+							if (response.body) {
+								res.writeHead(response.status, { "content-type": ct, "cache-control": "no-cache", "x-accel-buffering": "no" });
+								pipeUpstreamStream(Readable.fromWeb(response.body as unknown as import("stream/web").ReadableStream), res, req);
+							} else {
+								const data = await response.text();
+								res.writeHead(response.status, { "content-type": ct });
+								res.end(data);
+							}
+							return; // relay handled the response
+						} catch (e) {
+							log("warn", "opencode relay failed, falling back to direct", { error: String(e) });
+							if (res.headersSent) return; // can't recover mid-stream
+						}
+					}
+					// direct path (existing, untouched)
 					const fwd = sanitizeHeaders(req.headers, target.hostname);
 					const proxy = https.request({
 						method: req.method,
@@ -499,6 +667,7 @@ export default async function (pi: ExtensionAPI) {
 	);
 
 	const aliveModels = [...opencodeChecks, ...mimoChecks, ...kiloChecks].filter((m) => m.alive);
+	aliveCatalog = aliveModels;
 
 	if (aliveModels.length === 0) {
 		log("warn", "no alive models found — extension inactive");
@@ -526,6 +695,117 @@ export default async function (pi: ExtensionAPI) {
 					? { supportsDeveloperRole: false, supportsReasoningEffort: false }
 					: { supportsDeveloperRole: false, supportsReasoningEffort: true },
 		})),
+	});
+
+	// ── /bansos command: toggle relay egress live (on|off|status|url [URL]) ───
+	pi.registerCommand("bansos", {
+		description: "Relay egress: on | off | status | url [URL] | deploy | list | use <URL> | remove <URL>",
+		getArgumentCompletions: (prefix: string) =>
+			["on", "off", "status", "url", "deploy", "list", "use", "remove"]
+				.filter((s) => s.startsWith(prefix)).map((s) => ({ value: s, label: s })),
+		handler: async (args: string, ctx) => {
+			const parts = String(args || "").trim().split(/\s+/);
+			const sub = parts[0] || "";
+			const rest = parts.slice(1).join(" ");
+
+			const flash = () => ctx.ui.notify(
+				`Relay ${relayState.enabled ? "ON" : "OFF"}${relayState.enabled ? ` → ${relayState.url}` : " (direct)"} | hits=${relayHits} | saved=${relayState.relays.length}`,
+				"info",
+			);
+			const persist = () => {
+				saveRelayState(relayState);
+				ctx.ui.setStatus("bansos", `relay: ${relayState.enabled ? "ON" : "OFF"}`);
+			};
+			// mutate in place so the saved-relays list is preserved across switches
+			const setRelay = (enabled: boolean, url: string, addLabel?: string) => {
+				relayState.enabled = enabled;
+				relayState.url = (url || "").trim() || DEFAULT_RELAY_URL;
+				if (relayState.url) ensureRelay(relayState, relayState.url, addLabel);
+			};
+			const doDeploy = async () => {
+				// Token prompted (not stored). pi's input has no secret mode — shows while typing.
+				const defaultName = `relay-${Date.now().toString(36)}`;
+				const token = (await ctx.ui.input("Vercel API token (vercel-…):", ""))?.trim();
+				if (!token) { ctx.ui.notify("Deploy cancelled — no token", "warning"); return; }
+				const name = ((await ctx.ui.input("Project name (empty = auto):", defaultName))?.trim()) || defaultName;
+				ctx.ui.setStatus("bansos", "deploying relay…");
+				try {
+					const url = await deployVercelRelay(token, name, (m) => ctx.ui.notify(m, "info"));
+					setRelay(true, url, `deployed ${name}`);
+					persist();
+					ctx.ui.notify(`✓ Deployed & active: ${url}`, "info");
+				} catch (e) {
+					ctx.ui.setStatus("bansos", `relay: ${relayState.enabled ? "ON" : "OFF"}`);
+					ctx.ui.notify(`Deploy failed: ${(e as Error).message}`, "error");
+				}
+			};
+			const switchRelay = async () => {
+				if (!relayState.relays.length) { ctx.ui.notify("No saved relays yet", "warning"); return; }
+				const fmt = (r: KnownRelay) => `${r.url === relayState.url ? "★ " : "  "}${r.url}${r.label ? `  (${r.label})` : ""}`;
+				const opts = relayState.relays.map(fmt);
+				const choice = await ctx.ui.select("Switch relay", opts);
+				if (!choice) return;
+				const match = relayState.relays.find((r) => fmt(r) === choice);
+				if (!match) return;
+				setRelay(true, match.url);
+				persist(); flash();
+			};
+			const showList = () => {
+				if (!relayState.relays.length) { ctx.ui.notify("No saved relays", "info"); return; }
+				const lines = relayState.relays.map((r) => `${r.url === relayState.url ? "★" : " "} ${r.url}${r.label ? `  [${r.label}]` : ""}`);
+				ctx.ui.notify(`Saved relays (${relayState.relays.length}):\n${lines.join("\n")}`, "info");
+			};
+
+			if (sub === "on") { setRelay(true, relayState.url || DEFAULT_RELAY_URL); persist(); flash(); }
+			else if (sub === "off") { relayState.enabled = false; persist(); flash(); }
+			else if (sub === "status") { flash(); }
+			else if (sub === "list") { showList(); }
+			else if (sub === "use") {
+				const url = (rest || (await ctx.ui.input("Relay URL to activate:", "")) || "").trim();
+				if (!url) { ctx.ui.notify("No URL given", "warning"); return; }
+				setRelay(true, url, "manual"); persist(); flash();
+			}
+			else if (sub === "remove") {
+				const url = (rest || (await ctx.ui.input("Relay URL to remove:", "")) || "").trim();
+				if (!url) { ctx.ui.notify("No URL given", "warning"); return; }
+				if (url === relayState.url) { ctx.ui.notify("Can't remove the active relay — switch first", "warning"); return; }
+				if (!relayState.relays.some((r) => r.url === url)) { ctx.ui.notify("Not in saved list", "warning"); return; }
+				removeRelay(relayState, url); persist();
+				ctx.ui.notify(`Removed: ${url}`, "info");
+			}
+			else if (sub === "url") {
+				const input = rest || (await ctx.ui.input("Relay URL (empty = default):", relayState.url || DEFAULT_RELAY_URL));
+				setRelay(relayState.enabled, (input || "").trim() || DEFAULT_RELAY_URL, "manual"); persist(); flash();
+			}
+			else if (sub === "deploy") { await doDeploy(); }
+			else {
+				const choice = await ctx.ui.select("bansos relay", [
+					`Relay: ${relayState.enabled ? "ON" : "OFF"} → ${relayState.url || "direct"}`,
+					"Turn ON",
+					"Turn OFF",
+					"Switch relay…",
+					"Set URL",
+					"Deploy Vercel relay…",
+					"List saved relays",
+				]);
+				if (choice === "Turn ON") { setRelay(true, relayState.url || DEFAULT_RELAY_URL); persist(); flash(); }
+				else if (choice === "Turn OFF") { relayState.enabled = false; persist(); flash(); }
+				else if (choice === "Switch relay…") { await switchRelay(); }
+				else if (choice === "Set URL") {
+					const input = await ctx.ui.input("Relay URL (empty = default):", relayState.url || DEFAULT_RELAY_URL);
+					setRelay(relayState.enabled, (input || "").trim() || DEFAULT_RELAY_URL, "manual"); persist(); flash();
+				}
+				else if (choice === "Deploy Vercel relay…") { await doDeploy(); }
+				else if (choice === "List saved relays") { showList(); }
+			}
+		}
+	});
+
+	// reload persisted state on session start/resume (env overrides still win)
+	pi.on("session_start", async (_event, ctx) => {
+		relayState = resolveRelayState();
+		ctx.ui?.setStatus?.("bansos", `relay: ${relayState.enabled ? "ON" : "OFF"}`);
+		log("info", `relay ${relayState.enabled ? "ON" : "OFF"} → ${relayState.url || "direct"}`);
 	});
 
 	pi.on("session_shutdown", () => {
