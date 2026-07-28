@@ -273,11 +273,14 @@ function parseJwtExp(jwt: string): number {
 	return Date.now() + 50 * 60 * 1000; // fallback 50 min
 }
 
+// Setup/health probes go DIRECT (fetch, not relayFetch): they're tiny liveness
+// pings, and relaying them adds a hop whose latency trips the 10s probe timeout
+// on slow models. Only real chat traffic uses the relay (IP masking).
 async function bootstrapJwt(): Promise<string> {
 	if (cachedJwt && Date.now() < jwtExpiresAt - JWT_EXPIRY_BUFFER_MS) return cachedJwt;
 
 	try {
-		const res = await relayFetch(MIMO_BOOTSTRAP_URL, {
+		const res = await fetch(MIMO_BOOTSTRAP_URL, {
 			method: "POST",
 			headers: { "content-type": "application/json" },
 			body: JSON.stringify({ client: generateFingerprint() }),
@@ -310,7 +313,7 @@ async function checkModelAlive(id: string, isMimo = false): Promise<boolean> {
 			await bootstrapJwt();
 			return true;
 		}
-		const res = await relayFetch(`${API}/chat/completions`, {
+		const res = await fetch(`${API}/chat/completions`, {
 			method: "POST",
 			headers: { "content-type": "application/json" },
 			body: JSON.stringify({ model: id, messages: [{ role: "user", content: "hi" }], max_tokens: 1, stream: false }),
@@ -325,7 +328,7 @@ async function checkModelAlive(id: string, isMimo = false): Promise<boolean> {
 // KiloCode gateway health check (free models are keyless — placeholder bearer)
 async function checkKiloAlive(id: string): Promise<boolean> {
 	try {
-		const res = await relayFetch(KILO_CHAT_URL, {
+		const res = await fetch(KILO_CHAT_URL, {
 			method: "POST",
 			headers: { "content-type": "application/json", "Authorization": "Bearer kilo-free" },
 			body: JSON.stringify({ model: id, messages: [{ role: "user", content: "hi" }], max_tokens: 1, stream: false }),
