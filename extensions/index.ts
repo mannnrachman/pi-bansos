@@ -305,36 +305,52 @@ function resetJwtCache(): void {
 	jwtExpiresAt = 0;
 }
 
-// ── Health Check ───────────────────────────────────────────────────
+// ── Health Check (catalog-based: fast, no per-model inference) ─────
+// Each upstream publishes a model list; fetch it ONCE (cached) and check
+// membership. A 1-token chat probe per model was too slow (large models need
+// 10s+ for the first token). Real usability is validated at chat time (300s).
+let opencodeCatalogP: Promise<Set<string> | null> | null = null;
+function opencodeCatalog(): Promise<Set<string> | null> {
+	if (!opencodeCatalogP) opencodeCatalogP = (async () => {
+		try {
+			const r = await fetch(`${API}/models`, { signal: AbortSignal.timeout(10_000) });
+			if (!r.ok) return null;
+			const d = await r.json();
+			return new Set<string>((d?.data ?? []).map((m: { id: string }) => m.id));
+		} catch { return null; }
+	})();
+	return opencodeCatalogP;
+}
+let kiloCatalogP: Promise<Set<string> | null> | null = null;
+function kiloCatalog(): Promise<Set<string> | null> {
+	if (!kiloCatalogP) kiloCatalogP = (async () => {
+		try {
+			const r = await fetch(KILO_CHAT_URL.replace("/chat/completions", "/models"), {
+				headers: { Authorization: "Bearer kilo-free" },
+				signal: AbortSignal.timeout(10_000),
+			});
+			if (!r.ok) return null;
+			const d = await r.json();
+			return new Set<string>((d?.data ?? []).map((m: { id: string }) => m.id));
+		} catch { return null; }
+	})();
+	return kiloCatalogP;
+}
+
 async function checkModelAlive(id: string, isMimo = false): Promise<boolean> {
 	try {
-		if (isMimo) {
-			// For mimo, just check bootstrap works
-			await bootstrapJwt();
-			return true;
-		}
-		const res = await fetch(`${API}/chat/completions`, {
-			method: "POST",
-			headers: { "content-type": "application/json" },
-			body: JSON.stringify({ model: id, messages: [{ role: "user", content: "hi" }], max_tokens: 1, stream: false }),
-			signal: AbortSignal.timeout(10_000),
-		});
-		return res.ok || res.status === 400 || res.status === 429;
+		if (isMimo) { await bootstrapJwt(); return true; } // MiMo has no catalog; verify the JWT bootstrap works
+		const cat = await opencodeCatalog();
+		return cat ? cat.has(id) : false;
 	} catch {
 		return false;
 	}
 }
 
-// KiloCode gateway health check (free models are keyless — placeholder bearer)
 async function checkKiloAlive(id: string): Promise<boolean> {
 	try {
-		const res = await fetch(KILO_CHAT_URL, {
-			method: "POST",
-			headers: { "content-type": "application/json", "Authorization": "Bearer kilo-free" },
-			body: JSON.stringify({ model: id, messages: [{ role: "user", content: "hi" }], max_tokens: 1, stream: false }),
-			signal: AbortSignal.timeout(10_000),
-		});
-		return res.ok;
+		const cat = await kiloCatalog();
+		return cat ? cat.has(id) : false;
 	} catch {
 		return false;
 	}
