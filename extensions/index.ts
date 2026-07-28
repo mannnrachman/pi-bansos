@@ -670,10 +670,10 @@ export default async function (pi: ExtensionAPI) {
 	aliveCatalog = aliveModels;
 
 	if (aliveModels.length === 0) {
-		log("warn", "no alive models found — extension inactive");
-		return;
-	}
-
+		// Don't bail: still register /bansos below so the user can recover
+		// (e.g. switch the relay off) instead of being stranded with no command.
+		log("warn", "no alive models found — provider inactive; /bansos still available to switch relay off / go direct");
+	} else {
 	log("info", `${aliveModels.length} model(s) registered: ${aliveModels.map((m) => m.id).join(", ")}`);
 
 	pi.registerProvider("bansos", {
@@ -696,6 +696,7 @@ export default async function (pi: ExtensionAPI) {
 					: { supportsDeveloperRole: false, supportsReasoningEffort: true },
 		})),
 	});
+	}
 
 	// ── /bansos command: toggle relay egress live (on|off|status|url [URL]) ───
 	pi.registerCommand("bansos", {
