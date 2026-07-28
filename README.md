@@ -30,6 +30,8 @@ pi
 # /model → bansos → choose a free model
 ```
 
+Run `/bansos` any time to toggle relay egress or switch between saved relays (see [Relay](#relay-optional)).
+
 Optional custom port:
 
 ```bash
