@@ -50,7 +50,7 @@ By default pi-bansos talks to the free upstreams **directly**. If your IP gets r
 | `/bansos list` | Show all saved relays (★ = active) |
 | `/bansos remove <URL>` | Forget a saved relay (the active one can't be removed) |
 | `/bansos deploy` | **Deploy a fresh Vercel relay** and switch to it |
-| `/bansos` | Interactive menu (incl. **Switch relay…**) |
+| `/bansos` | Interactive menu (incl. **Switch** / **Remove relay…**) |
 
 The state is saved at the package root (`.relay-state.json`, next to the `extensions/` folder) and remembered across restarts — you manage it only via `/bansos`, nothing in your shell. Every relay you `deploy`, `use`, or `url` is **kept in a saved list**, so you can switch between them anytime without re-typing URLs. Any HTTP relay works (Vercel, Cloudflare, Deno, or your own). There is **no built-in default** — run `/bansos deploy` to create one or `/bansos url <URL>` to use your own.
 

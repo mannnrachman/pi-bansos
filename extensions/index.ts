@@ -756,6 +756,17 @@ export default async function (pi: ExtensionAPI) {
 				const lines = relayState.relays.map((r) => `${r.url === relayState.url ? "★" : " "} ${r.url}${r.label ? `  [${r.label}]` : ""}`);
 				ctx.ui.notify(`Saved relays (${relayState.relays.length}):\n${lines.join("\n")}`, "info");
 			};
+			const removeRelayMenu = async () => {
+				const removable = relayState.relays.filter((r) => r.url !== relayState.url);
+				if (!removable.length) { ctx.ui.notify("Nothing to remove — the active relay can't be removed (switch first)", "warning"); return; }
+				const fmt = (r: KnownRelay) => `${r.url}${r.label ? `  (${r.label})` : ""}`;
+				const choice = await ctx.ui.select("Remove relay", removable.map(fmt));
+				if (!choice) return;
+				const match = removable.find((r) => fmt(r) === choice);
+				if (!match) return;
+				removeRelay(relayState, match.url); persist();
+				ctx.ui.notify(`Removed: ${match.url}`, "info");
+			};
 
 			if (sub === "on") { setRelay(true, relayState.url || DEFAULT_RELAY_URL); persist(); flash(); }
 			else if (sub === "off") { relayState.enabled = false; persist(); flash(); }
@@ -785,6 +796,7 @@ export default async function (pi: ExtensionAPI) {
 					"Turn ON",
 					"Turn OFF",
 					"Switch relay…",
+					"Remove relay…",
 					"Set URL",
 					"Deploy Vercel relay…",
 					"List saved relays",
@@ -792,6 +804,7 @@ export default async function (pi: ExtensionAPI) {
 				if (choice === "Turn ON") { setRelay(true, relayState.url || DEFAULT_RELAY_URL); persist(); flash(); }
 				else if (choice === "Turn OFF") { relayState.enabled = false; persist(); flash(); }
 				else if (choice === "Switch relay…") { await switchRelay(); }
+				else if (choice === "Remove relay…") { await removeRelayMenu(); }
 				else if (choice === "Set URL") {
 					const input = await ctx.ui.input("Relay URL (empty = default):", relayState.url || DEFAULT_RELAY_URL);
 					setRelay(relayState.enabled, (input || "").trim() || DEFAULT_RELAY_URL, "manual"); persist(); flash();
