@@ -207,7 +207,7 @@ const KILO_MODELS: ModelDef[] = [
 	{ id: "stepfun/step-3.7-flash:free", name: "Step 3.7 Flash Free", reasoning: false, contextWindow: 262_144, maxTokens: 262_144 },
 	{ id: "nvidia/nemotron-3-ultra-550b-a55b:free", name: "Nemotron 3 Ultra Free", reasoning: true, contextWindow: 1_000_000, maxTokens: 65_536, thinkingFormat: "openrouter" },
 	// ponytail: nemotron-super emits output in `reasoning` field (not `content`) under pi's payload → renders blank in agent use; gateway-direct works. Left registered, known-broken via pi until upstream changes.
-	{ id: "nvidia/nemotron-3-super-120b-a12b:free", name: "Nemotron 3 Super Free", reasoning: true, contextWindow: 1_000_000, maxTokens: 262_144, thinkingFormat: "openrouter" },
+	{ id: "nvidia/nemotron-3-super-120b-a12b:free", name: "Nemotron 3 Super Free", reasoning: true, contextWindow: 262_144, maxTokens: 262_144, thinkingFormat: "openrouter" },
 	{ id: "poolside/laguna-m.1:free", name: "Laguna M.1 Free", reasoning: false, contextWindow: 262_144, maxTokens: 32_768 },
 	{ id: "cohere/north-mini-code:free", name: "North Mini Code Free", reasoning: false, contextWindow: 256_000, maxTokens: 64_000 },
 	{ id: "poolside/laguna-xs-2.1:free", name: "Laguna XS 2.1 Free", reasoning: false, contextWindow: 262_144, maxTokens: 32_768 },
