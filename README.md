@@ -1,19 +1,57 @@
 # pi-bansos
 
-Free model provider for [**pi**](https://pi.dev) ([browse packages](https://pi.dev/packages)). It adds a `bansos` provider with live free models from OpenCode Zen, Xiaomi MiMo Free, and the KiloCode gateway through a local OpenAI-compatible proxy.
+Free model provider for [**pi**](https://pi.dev) ([browse packages](https://pi.dev/packages)). It adds a `bansos` provider with live free models from **3 upstreams** — OpenCode Zen, Xiaomi MiMo Free, and KiloCode gateway — through a local OpenAI-compatible proxy.
 
-## Why
+## Models (17 total)
 
-- No user API key required for supported free upstreams
-- Auto-checks model availability on every pi startup
-- Registers only models that are currently alive
-- Supports OpenCode free models, `mimo-auto`, and KiloCode gateway free models (keyless, 200 req/hr per IP)
-- Local-only proxy binds to `127.0.0.1`
-- Optional **relay egress** — route upstream calls through a Vercel/Cloudflare relay to dodge per-IP rate limits, toggled live via `/bansos`
+All models are **free, no API key required**. pi-bansos health-checks every model at startup and only registers the ones that are currently alive.
 
-## Education & responsible use
+### OpenCode Zen (7 models)
 
-`pi-bansos` is made for learning how pi extensions, local proxies, OpenAI-compatible providers, and free-model routing work. Use it responsibly: respect upstream terms, avoid abuse or traffic flooding, and expect free access to change or stop anytime.
+| Model ID | Name | Context | Max Output | Reasoning |
+|----------|------|---------|------------|-----------|
+| `deepseek-v4-flash-free` | DeepSeek V4 Flash | 1M tokens | 384K tokens | ✅ |
+| `mimo-v2.5-free` | Mimo V2.5 Free | 1M tokens | 131K tokens | ❌ |
+| `nemotron-3-ultra-free` | Nemotron 3 Ultra | 1M tokens | 65K tokens | ✅ |
+| `north-mini-code-free` | North Mini Code | 256K tokens | 64K tokens | ✅ |
+| `big-pickle` | Big Pickle | 200K tokens | 32K tokens | ✅ |
+| `ling-3.0-flash-free` | Ling 3.0 Flash | 262K tokens | 32K tokens | ✅ |
+| `laguna-s-2.1-free` | Laguna S 2.1 | 262K tokens | 32K tokens | ✅ |
+
+### Xiaomi MiMo Free (1 model)
+
+| Model ID | Name | Context | Max Output | Reasoning |
+|----------|------|---------|------------|-----------|
+| `mimo-auto` | MiMo Auto (Free) | 1M tokens | 131K tokens | ❌ |
+
+> Auto-selects the best available MiMo model behind the scenes.
+
+### KiloCode Gateway (9 models)
+
+Keyless — no API key needed. 200 requests/hour per IP.
+
+| Model ID | Name | Context | Max Output | Reasoning |
+|----------|------|---------|------------|-----------|
+| `kilo-auto/free` | Kilo Auto Free | 256K tokens | 10K tokens | ❌ |
+| `stepfun/step-3.7-flash:free` | Step 3.7 Flash Free | 262K tokens | 262K tokens | ❌ |
+| `nvidia/nemotron-3-ultra-550b-a55b:free` | Nemotron 3 Ultra Free | 1M tokens | 65K tokens | ✅ |
+| `nvidia/nemotron-3-super-120b-a12b:free` | Nemotron 3 Super Free | 262K tokens | 262K tokens | ✅ ⚠️ |
+| `poolside/laguna-m.1:free` | Laguna M.1 Free | 262K tokens | 32K tokens | ❌ |
+| `cohere/north-mini-code:free` | North Mini Code Free | 256K tokens | 64K tokens | ❌ |
+| `poolside/laguna-xs-2.1:free` | Laguna XS 2.1 Free | 262K tokens | 32K tokens | ❌ |
+| `nvidia/nemotron-3-nano-omni-30b-a3b-reasoning:free` | Nemotron 3 Nano Omni Free | 256K tokens | 65K tokens | ✅ |
+| `openrouter/free` | OpenRouter Free (auto) | 200K tokens | 65K tokens | ❌ |
+
+> ⚠️ **Nemotron 3 Super Free** — known issue: emits output in `reasoning` field instead of `content`. May render blank in some clients until upstream fixes this.
+
+## Why pi-bansos
+
+- **Zero cost** — all models free, no API key needed for supported upstreams
+- **Auto health-check** — only alive models registered at startup; dead ones skipped silently
+- **17 models from 3 sources** — OpenCode Zen + MiMo Free + KiloCode gateway
+- **Local-only proxy** — binds to `127.0.0.1`, nothing exposed externally
+- **Optional relay egress** — route through a Vercel/Cloudflare relay to dodge per-IP rate limits, toggled live via `/bansos`
+- **Auto port bump** — if port 18080 is taken, automatically tries the next one (up to 18100)
 
 ## Install
 
@@ -56,13 +94,13 @@ By default pi-bansos talks to the free upstreams **directly**. If your IP gets r
 
 The state is saved at the package root (`.relay-state.json`, next to the `extensions/` folder) and remembered across restarts — you manage it only via `/bansos`, nothing in your shell. Every relay you `deploy`, `use`, or `url` is **kept in a saved list**, so you can switch between them anytime without re-typing URLs. Any HTTP relay works (Vercel, Cloudflare, Deno, or your own). There is **no built-in default** — run `/bansos deploy` to create one or `/bansos url <URL>` to use your own.
 
-**Switching between saved relays** (e.g. you deployed one and also have the default):
+**Switching between saved relays** (e.g. you deployed one and also have another):
 
 ```text
 /bansos list
   Saved relays (2):
   ★ https://pi-bansos-relay-xxxx.vercel.app   [deployed relay-2026]
-    https://vercel-relay-yyyy.vercel.app       [9Router default]
+    https://vercel-relay-yyyy.vercel.app       [manual]
 
 /bansos            → Switch relay… → pick one → active (live, no restart)
 /bansos use https://vercel-relay-yyyy.vercel.app   # or switch directly
@@ -70,7 +108,7 @@ The state is saved at the package root (`.relay-state.json`, next to the `extens
 
 ### `/bansos deploy` — one-command Vercel relay
 
-Deploys your own edge relay to Vercel (same flow 9Router uses) and activates it immediately. It asks for a **Vercel API token** (get one at https://vercel.com/account/tokens) and an optional project name, then uploads a tiny edge function and waits for it to go live (~10–40 s). The new relay URL is saved and switched on; the token is used once and **never stored**.
+Deploys your own Node.js relay to Vercel and activates it immediately. It asks for a **Vercel API token** (get one at https://vercel.com/account/tokens) and an optional project name, then uploads a tiny worker and waits for it to go live (~10–40 s). The new relay URL is saved and switched on; the token is used once and **never stored**.
 
 ```text
 /bansos deploy
@@ -81,13 +119,16 @@ Deploys your own edge relay to Vercel (same flow 9Router uses) and activates it 
   ✓ Deployed & active: https://relay-2026-xxx.vercel.app
 ```
 
-> The Vercel edge relay masks your IP behind Vercel's dynamic edge IPs (hundreds across 20+ regions). Free tier: 100 GB bandwidth + 500 K invocations/month. Deploy on multiple accounts for more IP diversity. The token input has no hidden/secret mode in the TUI, so it shows while typing — paste, deploy, done.
+> The Vercel relay masks your IP behind Vercel's dynamic edge IPs. Free tier: 100 GB bandwidth + 500 K invocations/month. Deploy on multiple accounts for more IP diversity. The token input has no hidden/secret mode in the TUI, so it shows while typing — paste, deploy, done.
 
 > A relay is a single fixed exit IP, not rotation. Useful when your IP is limited; otherwise it just adds a small hop.
 
 ## Notes
 
-Free upstream models are best-effort: promos can expire, model IDs can change, and rate limits may apply. `pi-bansos` health-checks them at startup so unavailable models are skipped instead of registered.
+- Free upstream models are best-effort: promos can expire, model IDs can change, and rate limits may apply
+- pi-bansos health-checks at startup so unavailable models are skipped instead of registered
+- KiloCode gateway: 200 req/hr per IP, keyless
+- MiMo Free: uses session affinity (Xiaomi rate-limit mechanism), auto-refreshes JWT
 
 ## Uninstall
 

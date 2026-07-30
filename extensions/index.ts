@@ -22,7 +22,8 @@ const KILO_CHAT_URL = "https://api.kilo.ai/api/gateway/chat/completions";
 const PORT = Number(process.env.BANSOS_PORT) || 18080;
 const HOST = "127.0.0.1";
 const API = `${UPSTREAM_OPENCODE}/v1`;
-const MIMO_SYSTEM_MARKER = "You are MiMoCode, an interactive CLI tool that helps users with software engineering tasks.";
+const MIMO_SYSTEM_MARKER =
+	"You are MiMoCode, an interactive CLI tool that helps users with software engineering tasks.";
 
 // ── Relay egress (vercel/cloudflare worker, x-relay-target pattern) ──────────
 // Same logic as 9router ProxyFetch: when enabled, redirect upstream calls to a
@@ -34,7 +35,11 @@ const DEFAULT_RELAY_URL = "";
 // State lives at the package root (parent of this extensions/ dir) — NOT under
 // extensions/ (which is in package.json "files" and would get published). Resolved
 // at runtime from the module's own location, so it works in dev and when installed.
-const RELAY_STATE_FILE = path.join(path.dirname(fileURLToPath(import.meta.url)), "..", ".relay-state.json");
+const RELAY_STATE_FILE = path.join(
+	path.dirname(fileURLToPath(import.meta.url)),
+	"..",
+	".relay-state.json",
+);
 
 type KnownRelay = { url: string; label?: string; addedAt?: string };
 type RelayState = { enabled: boolean; url: string; relays: KnownRelay[] };
@@ -42,12 +47,21 @@ function loadRelayState(): RelayState {
 	try {
 		const s = JSON.parse(fs.readFileSync(RELAY_STATE_FILE, "utf8"));
 		const relays: KnownRelay[] = Array.isArray(s?.relays) ? s.relays : [];
-		return { enabled: Boolean(s?.enabled), url: typeof s?.url === "string" ? s.url.trim() : "", relays };
-	} catch { return { enabled: false, url: "", relays: [] }; }
+		return {
+			enabled: Boolean(s?.enabled),
+			url: typeof s?.url === "string" ? s.url.trim() : "",
+			relays,
+		};
+	} catch {
+		return { enabled: false, url: "", relays: [] };
+	}
 }
 function saveRelayState(s: RelayState): void {
-	try { fs.writeFileSync(RELAY_STATE_FILE, JSON.stringify(s)); }
-	catch (e) { log("warn", "could not persist relay state", { error: String(e) }); }
+	try {
+		fs.writeFileSync(RELAY_STATE_FILE, JSON.stringify(s));
+	} catch (e) {
+		log("warn", "could not persist relay state", { error: String(e) });
+	}
 }
 // dedupe-add a relay to the known list
 function ensureRelay(s: RelayState, url: string, label?: string): void {
@@ -77,7 +91,10 @@ let aliveCatalog: ModelDef[] = [];
 
 // Relay-aware fetch. Direct when disabled; otherwise POST to relay URL with the
 // two relay headers. Falls back to direct on relay error (non-strict).
-async function relayFetch(url: string, opts: RequestInit = {}): Promise<Response> {
+async function relayFetch(
+	url: string,
+	opts: RequestInit = {},
+): Promise<Response> {
 	if (!relayState.enabled || !relayState.url) return fetch(url, opts);
 	try {
 		const u = new URL(url);
@@ -87,7 +104,10 @@ async function relayFetch(url: string, opts: RequestInit = {}): Promise<Response
 		headers.set("x-relay-path", `${u.pathname}${u.search}`);
 		return await fetch(relayState.url, { ...opts, headers });
 	} catch (e) {
-		log("warn", "relay fetch failed, falling back to direct", { url, error: String(e) });
+		log("warn", "relay fetch failed, falling back to direct", {
+			url,
+			error: String(e),
+		});
 		return fetch(url, opts);
 	}
 }
@@ -99,7 +119,7 @@ async function relayFetch(url: string, opts: RequestInit = {}): Promise<Response
 const VERCEL_API = "https://api.vercel.com";
 const VERCEL_RELAY_WORKER = `// Only the 3 upstreams pi-bansos talks to. Anything else = open proxy abuse.
 const ALLOWED_TARGETS = ["https://opencode.ai", "https://api.xiaomimimo.com", "https://api.kilo.ai"];
-export const config = { runtime: "edge" };
+export const config = { runtime: "nodejs", maxDuration: 300 };
 export default async function handler(req) {
   const target = req.headers.get("x-relay-target");
   const relayPath = req.headers.get("x-relay-path") || "/";
@@ -114,40 +134,70 @@ export default async function handler(req) {
   return new Response(response.body, { status: response.status, headers: response.headers });
 }`;
 
-async function deployVercelRelay(token: string, name: string, onProgress?: (msg: string) => void): Promise<string> {
-	const auth = { Authorization: `Bearer ${token}`, "Content-Type": "application/json" };
+async function deployVercelRelay(
+	token: string,
+	name: string,
+	onProgress?: (msg: string) => void,
+): Promise<string> {
+	const auth = {
+		Authorization: `Bearer ${token}`,
+		"Content-Type": "application/json",
+	};
 	// 1. create deployment (3 inline files, no git repo)
 	onProgress?.("Uploading relay to Vercel…");
 	const dep = await fetch(`${VERCEL_API}/v13/deployments`, {
-		method: "POST", headers: auth,
+		method: "POST",
+		headers: auth,
 		body: JSON.stringify({
 			name,
 			files: [
 				{ file: "api/relay.js", data: VERCEL_RELAY_WORKER },
-				{ file: "package.json", data: JSON.stringify({ name, version: "1.0.0" }) },
-				{ file: "vercel.json", data: JSON.stringify({ rewrites: [{ source: "/(.*)", destination: "/api/relay" }] }) },
+				{
+					file: "package.json",
+					data: JSON.stringify({ name, version: "1.0.0" }),
+				},
+				{
+					file: "vercel.json",
+					data: JSON.stringify({
+						rewrites: [{ source: "/(.*)", destination: "/api/relay" }],
+						functions: {
+							"api/relay.js": { runtime: "nodejs22.x", maxDuration: 300 },
+						},
+					}),
+				},
 			],
 			projectSettings: { framework: null },
 			target: "production",
 		}),
 	});
 	if (!dep.ok) {
-		const e = await dep.json().catch(() => ({}) as { error?: { message?: string } });
-		throw new Error(e?.error?.message || `Vercel deploy failed (HTTP ${dep.status})`);
+		const e = await dep
+			.json()
+			.catch(() => ({}) as { error?: { message?: string } });
+		throw new Error(
+			e?.error?.message || `Vercel deploy failed (HTTP ${dep.status})`,
+		);
 	}
 	const depJson = await dep.json();
 	const depId = depJson.id || depJson.uid;
 	const projectId = depJson.projectId || name;
 	// 2. make the deployment public (disable SSO protection)
-	await fetch(`${VERCEL_API}/v9/projects/${projectId}`, { method: "PATCH", headers: auth, body: JSON.stringify({ ssoProtection: null }) });
+	await fetch(`${VERCEL_API}/v9/projects/${projectId}`, {
+		method: "PATCH",
+		headers: auth,
+		body: JSON.stringify({ ssoProtection: null }),
+	});
 	// 3. poll until READY (3s interval, 120s timeout — same as 9Router)
 	onProgress?.("Waiting for deployment to go live…");
 	const deadline = Date.now() + 120_000;
 	while (Date.now() < deadline) {
-		const s = await fetch(`${VERCEL_API}/v13/deployments/${depId}`, { headers: { Authorization: `Bearer ${token}` } });
+		const s = await fetch(`${VERCEL_API}/v13/deployments/${depId}`, {
+			headers: { Authorization: `Bearer ${token}` },
+		});
 		const j = await s.json();
 		if (j.readyState === "READY") return `https://${j.url}`;
-		if (j.readyState === "ERROR" || j.readyState === "CANCELED") throw new Error(`Deployment failed: ${j.readyState}`);
+		if (j.readyState === "ERROR" || j.readyState === "CANCELED")
+			throw new Error(`Deployment failed: ${j.readyState}`);
 		await new Promise((r) => setTimeout(r, 3000));
 	}
 	throw new Error("Deployment timed out (120s)");
@@ -186,33 +236,138 @@ interface ModelDef {
 
 // OpenCode models (existing) — factual specs from model docs / models.dev / gateway
 const KNOWN_MODELS: ModelDef[] = [
-	{ id: "deepseek-v4-flash-free", name: "DeepSeek V4 Flash", reasoning: true, contextWindow: 1_000_000, maxTokens: 384_000 },
-	{ id: "mimo-v2.5-free", name: "Mimo V2.5 Free", reasoning: false, contextWindow: 1_048_576, maxTokens: 131_072 },
-	{ id: "nemotron-3-ultra-free", name: "Nemotron 3 Ultra", reasoning: true, contextWindow: 1_000_000, maxTokens: 65_536 },
-	{ id: "north-mini-code-free", name: "North Mini Code", reasoning: true, contextWindow: 256_000, maxTokens: 64_000 },
-	{ id: "big-pickle", name: "Big Pickle", reasoning: true, contextWindow: 200_000, maxTokens: 32_000 },
-	{ id: "ling-3.0-flash-free", name: "Ling 3.0 Flash", reasoning: true, contextWindow: 262_144, maxTokens: 32_768 },
-	{ id: "laguna-s-2.1-free", name: "Laguna S 2.1", reasoning: true, contextWindow: 262_144, maxTokens: 32_768 },
+	{
+		id: "deepseek-v4-flash-free",
+		name: "DeepSeek V4 Flash",
+		reasoning: true,
+		contextWindow: 1_000_000,
+		maxTokens: 384_000,
+	},
+	{
+		id: "mimo-v2.5-free",
+		name: "Mimo V2.5 Free",
+		reasoning: false,
+		contextWindow: 1_048_576,
+		maxTokens: 131_072,
+	},
+	{
+		id: "nemotron-3-ultra-free",
+		name: "Nemotron 3 Ultra",
+		reasoning: true,
+		contextWindow: 1_000_000,
+		maxTokens: 65_536,
+	},
+	{
+		id: "north-mini-code-free",
+		name: "North Mini Code",
+		reasoning: true,
+		contextWindow: 256_000,
+		maxTokens: 64_000,
+	},
+	{
+		id: "big-pickle",
+		name: "Big Pickle",
+		reasoning: true,
+		contextWindow: 200_000,
+		maxTokens: 32_000,
+	},
+	{
+		id: "ling-3.0-flash-free",
+		name: "Ling 3.0 Flash",
+		reasoning: true,
+		contextWindow: 262_144,
+		maxTokens: 32_768,
+	},
+	{
+		id: "laguna-s-2.1-free",
+		name: "Laguna S 2.1",
+		reasoning: true,
+		contextWindow: 262_144,
+		maxTokens: 32_768,
+	},
 ];
 
 // Mimo Free models (from xiaomi free API) — MiMo V2.5: 1M ctx, 128K out
 // Per 9router/open-sse/config/providerModels.js: "free channel only serves mimo-auto"
 const MIMO_MODELS: ModelDef[] = [
-	{ id: "mimo-auto", name: "MiMo Auto (Free)", reasoning: false, contextWindow: 1_048_576, maxTokens: 131_072 },
+	{
+		id: "mimo-auto",
+		name: "MiMo Auto (Free)",
+		reasoning: false,
+		contextWindow: 1_048_576,
+		maxTokens: 131_072,
+	},
 ];
 
 // KiloCode gateway free models (keyless — https://kilo.ai/docs/gateway)
 const KILO_MODELS: ModelDef[] = [
-	{ id: "kilo-auto/free", name: "Kilo Auto Free", reasoning: false, contextWindow: 256_000, maxTokens: 10_000 },
-	{ id: "stepfun/step-3.7-flash:free", name: "Step 3.7 Flash Free", reasoning: false, contextWindow: 262_144, maxTokens: 262_144 },
-	{ id: "nvidia/nemotron-3-ultra-550b-a55b:free", name: "Nemotron 3 Ultra Free", reasoning: true, contextWindow: 1_000_000, maxTokens: 65_536, thinkingFormat: "openrouter" },
+	{
+		id: "kilo-auto/free",
+		name: "Kilo Auto Free",
+		reasoning: false,
+		contextWindow: 256_000,
+		maxTokens: 10_000,
+	},
+	{
+		id: "stepfun/step-3.7-flash:free",
+		name: "Step 3.7 Flash Free",
+		reasoning: false,
+		contextWindow: 262_144,
+		maxTokens: 262_144,
+	},
+	{
+		id: "nvidia/nemotron-3-ultra-550b-a55b:free",
+		name: "Nemotron 3 Ultra Free",
+		reasoning: true,
+		contextWindow: 1_000_000,
+		maxTokens: 65_536,
+		thinkingFormat: "openrouter",
+	},
 	// ponytail: nemotron-super emits output in `reasoning` field (not `content`) under pi's payload → renders blank in agent use; gateway-direct works. Left registered, known-broken via pi until upstream changes.
-	{ id: "nvidia/nemotron-3-super-120b-a12b:free", name: "Nemotron 3 Super Free", reasoning: true, contextWindow: 262_144, maxTokens: 262_144, thinkingFormat: "openrouter" },
-	{ id: "poolside/laguna-m.1:free", name: "Laguna M.1 Free", reasoning: false, contextWindow: 262_144, maxTokens: 32_768 },
-	{ id: "cohere/north-mini-code:free", name: "North Mini Code Free", reasoning: false, contextWindow: 256_000, maxTokens: 64_000 },
-	{ id: "poolside/laguna-xs-2.1:free", name: "Laguna XS 2.1 Free", reasoning: false, contextWindow: 262_144, maxTokens: 32_768 },
-	{ id: "nvidia/nemotron-3-nano-omni-30b-a3b-reasoning:free", name: "Nemotron 3 Nano Omni Free", reasoning: true, contextWindow: 256_000, maxTokens: 65_536, thinkingFormat: "openrouter" },
-	{ id: "openrouter/free", name: "OpenRouter Free (auto)", reasoning: false, contextWindow: 200_000, maxTokens: 65_536 },
+	{
+		id: "nvidia/nemotron-3-super-120b-a12b:free",
+		name: "Nemotron 3 Super Free",
+		reasoning: true,
+		contextWindow: 262_144,
+		maxTokens: 262_144,
+		thinkingFormat: "openrouter",
+	},
+	{
+		id: "poolside/laguna-m.1:free",
+		name: "Laguna M.1 Free",
+		reasoning: false,
+		contextWindow: 262_144,
+		maxTokens: 32_768,
+	},
+	{
+		id: "cohere/north-mini-code:free",
+		name: "North Mini Code Free",
+		reasoning: false,
+		contextWindow: 256_000,
+		maxTokens: 64_000,
+	},
+	{
+		id: "poolside/laguna-xs-2.1:free",
+		name: "Laguna XS 2.1 Free",
+		reasoning: false,
+		contextWindow: 262_144,
+		maxTokens: 32_768,
+	},
+	{
+		id: "nvidia/nemotron-3-nano-omni-30b-a3b-reasoning:free",
+		name: "Nemotron 3 Nano Omni Free",
+		reasoning: true,
+		contextWindow: 256_000,
+		maxTokens: 65_536,
+		thinkingFormat: "openrouter",
+	},
+	{
+		id: "openrouter/free",
+		name: "OpenRouter Free (auto)",
+		reasoning: false,
+		contextWindow: 200_000,
+		maxTokens: 65_536,
+	},
 ];
 const KILO_MODEL_IDS = new Set(KILO_MODELS.map((m) => m.id));
 
@@ -221,9 +376,18 @@ const ALLOWED_PATH_PATTERN = /^\/v1\/[a-zA-Z0-9/_.,\-?&=]*$/;
 const PATH_TRAVERSAL_PATTERN = /\.\./;
 const ALLOWED_METHODS = new Set(["GET", "POST", "OPTIONS", "HEAD"]);
 const STRIP_HEADERS = new Set([
-	"authorization", "host", "x-forwarded-for", "x-forwarded-host",
-	"x-forwarded-proto", "x-real-ip", "x-client-ip", "x-originate-ip",
-	"cookie", "set-cookie", "proxy-connection", "proxy-authorization",
+	"authorization",
+	"host",
+	"x-forwarded-for",
+	"x-forwarded-host",
+	"x-forwarded-proto",
+	"x-real-ip",
+	"x-client-ip",
+	"x-originate-ip",
+	"cookie",
+	"set-cookie",
+	"proxy-connection",
+	"proxy-authorization",
 ]);
 
 // ── Logger ─────────────────────────────────────────────────────────
@@ -267,7 +431,9 @@ function generateFingerprint(): string {
 // Parse JWT exp claim (per 9router mimo-free.js parseJwtExp)
 function parseJwtExp(jwt: string): number {
 	try {
-		const payload = JSON.parse(Buffer.from(jwt.split(".")[1], "base64").toString());
+		const payload = JSON.parse(
+			Buffer.from(jwt.split(".")[1], "base64").toString(),
+		);
 		if (payload.exp) return payload.exp * 1000;
 	} catch {}
 	return Date.now() + 50 * 60 * 1000; // fallback 50 min
@@ -277,7 +443,8 @@ function parseJwtExp(jwt: string): number {
 // pings, and relaying them adds a hop whose latency trips the 10s probe timeout
 // on slow models. Only real chat traffic uses the relay (IP masking).
 async function bootstrapJwt(): Promise<string> {
-	if (cachedJwt && Date.now() < jwtExpiresAt - JWT_EXPIRY_BUFFER_MS) return cachedJwt;
+	if (cachedJwt && Date.now() < jwtExpiresAt - JWT_EXPIRY_BUFFER_MS)
+		return cachedJwt;
 
 	try {
 		const res = await fetch(MIMO_BOOTSTRAP_URL, {
@@ -311,35 +478,53 @@ function resetJwtCache(): void {
 // 10s+ for the first token). Real usability is validated at chat time (300s).
 let opencodeCatalogP: Promise<Set<string> | null> | null = null;
 function opencodeCatalog(): Promise<Set<string> | null> {
-	if (!opencodeCatalogP) opencodeCatalogP = (async () => {
-		try {
-			const r = await fetch(`${API}/models`, { signal: AbortSignal.timeout(10_000) });
-			if (!r.ok) return null;
-			const d = await r.json();
-			return new Set<string>((d?.data ?? []).map((m: { id: string }) => m.id));
-		} catch { return null; }
-	})();
+	if (!opencodeCatalogP)
+		opencodeCatalogP = (async () => {
+			try {
+				const r = await fetch(`${API}/models`, {
+					signal: AbortSignal.timeout(10_000),
+				});
+				if (!r.ok) return null;
+				const d = await r.json();
+				return new Set<string>(
+					(d?.data ?? []).map((m: { id: string }) => m.id),
+				);
+			} catch {
+				return null;
+			}
+		})();
 	return opencodeCatalogP;
 }
 let kiloCatalogP: Promise<Set<string> | null> | null = null;
 function kiloCatalog(): Promise<Set<string> | null> {
-	if (!kiloCatalogP) kiloCatalogP = (async () => {
-		try {
-			const r = await fetch(KILO_CHAT_URL.replace("/chat/completions", "/models"), {
-				headers: { Authorization: "Bearer kilo-free" },
-				signal: AbortSignal.timeout(10_000),
-			});
-			if (!r.ok) return null;
-			const d = await r.json();
-			return new Set<string>((d?.data ?? []).map((m: { id: string }) => m.id));
-		} catch { return null; }
-	})();
+	if (!kiloCatalogP)
+		kiloCatalogP = (async () => {
+			try {
+				const r = await fetch(
+					KILO_CHAT_URL.replace("/chat/completions", "/models"),
+					{
+						headers: { Authorization: "Bearer kilo-free" },
+						signal: AbortSignal.timeout(10_000),
+					},
+				);
+				if (!r.ok) return null;
+				const d = await r.json();
+				return new Set<string>(
+					(d?.data ?? []).map((m: { id: string }) => m.id),
+				);
+			} catch {
+				return null;
+			}
+		})();
 	return kiloCatalogP;
 }
 
 async function checkModelAlive(id: string, isMimo = false): Promise<boolean> {
 	try {
-		if (isMimo) { await bootstrapJwt(); return true; } // MiMo has no catalog; verify the JWT bootstrap works
+		if (isMimo) {
+			await bootstrapJwt();
+			return true;
+		} // MiMo has no catalog; verify the JWT bootstrap works
 		const cat = await opencodeCatalog();
 		return cat ? cat.has(id) : false;
 	} catch {
@@ -369,14 +554,22 @@ function validatePath(rawUrl: string): URL | null {
 	if (PATH_TRAVERSAL_PATTERN.test(cleaned)) return null;
 	try {
 		const decoded = decodeURIComponent(cleaned);
-		if (decoded !== cleaned && !ALLOWED_PATH_PATTERN.test(`/${decoded}`)) return null;
-	} catch { return null; }
+		if (decoded !== cleaned && !ALLOWED_PATH_PATTERN.test(`/${decoded}`))
+			return null;
+	} catch {
+		return null;
+	}
 	try {
 		return new URL(cleaned, `${UPSTREAM_OPENCODE}/`);
-	} catch { return null; }
+	} catch {
+		return null;
+	}
 }
 
-function sanitizeHeaders(incoming: http.IncomingHttpHeaders, targetHost: string): Record<string, string> {
+function sanitizeHeaders(
+	incoming: http.IncomingHttpHeaders,
+	targetHost: string,
+): Record<string, string> {
 	const sanitized: Record<string, string> = {};
 	for (const [key, value] of Object.entries(incoming)) {
 		const lower = key.toLowerCase();
@@ -393,29 +586,52 @@ function sanitizeHeaders(incoming: http.IncomingHttpHeaders, targetHost: string)
 function injectSystemMarker(body: any): any {
 	const messages = body?.messages;
 	if (!Array.isArray(messages)) return body;
-	const hasMarker = messages.some((m: any) => m?.role === "system" && typeof m.content === "string" && m.content.includes(MIMO_SYSTEM_MARKER));
+	const hasMarker = messages.some(
+		(m: any) =>
+			m?.role === "system" &&
+			typeof m.content === "string" &&
+			m.content.includes(MIMO_SYSTEM_MARKER),
+	);
 	if (hasMarker) return body;
-	return { ...body, messages: [{ role: "system", content: MIMO_SYSTEM_MARKER }, ...messages] };
+	return {
+		...body,
+		messages: [{ role: "system", content: MIMO_SYSTEM_MARKER }, ...messages],
+	};
 }
 
 // ponytail: shared stream pipe — upstream abort/timeout must end response,
 // not become an uncaught exception that crashes pi.
-function pipeUpstreamStream(nodeStream: Readable, res: http.ServerResponse, req: http.IncomingMessage): void {
+function pipeUpstreamStream(
+	nodeStream: Readable,
+	res: http.ServerResponse,
+	req: http.IncomingMessage,
+): void {
 	nodeStream.on("error", (e: unknown) => {
 		log("error", "upstream stream error", { error: String(e) });
 		try {
 			const canSendError = !res.headersSent;
-			if (canSendError) res.writeHead(502, { "content-type": "application/json" });
-			res.end(canSendError ? JSON.stringify({ error: "upstream stream error" }) : undefined);
+			if (canSendError)
+				res.writeHead(502, { "content-type": "application/json" });
+			res.end(
+				canSendError
+					? JSON.stringify({ error: "upstream stream error" })
+					: undefined,
+			);
 		} catch {}
 	});
 	nodeStream.pipe(res);
-	req.on("aborted", () => { if (!nodeStream.destroyed) nodeStream.destroy(); });
-	req.on("close", () => { if (!nodeStream.destroyed) nodeStream.destroy(); });
+	req.on("aborted", () => {
+		if (!nodeStream.destroyed) nodeStream.destroy();
+	});
+	req.on("close", () => {
+		if (!nodeStream.destroyed) nodeStream.destroy();
+	});
 }
 
 // ── Start local proxy ──────────────────────────────────────────────
-function startProxy(overridePort?: number): Promise<{ server: http.Server; port: number }> {
+function startProxy(
+	overridePort?: number,
+): Promise<{ server: http.Server; port: number }> {
 	const basePort = overridePort ?? PORT;
 
 	const server = http.createServer((req, res) => {
@@ -435,16 +651,34 @@ function startProxy(overridePort?: number): Promise<{ server: http.Server; port:
 		}
 
 		if (req.method === "OPTIONS") {
-			res.writeHead(204, { "access-control-allow-origin": "*", "access-control-allow-methods": "GET, POST, OPTIONS", "access-control-max-age": "86400" });
+			res.writeHead(204, {
+				"access-control-allow-origin": "*",
+				"access-control-allow-methods": "GET, POST, OPTIONS",
+				"access-control-max-age": "86400",
+			});
 			res.end();
 			return;
 		}
 
 		// Serve ONLY our registered free models. Never forward /v1/models to
 		// upstream (that would leak ~54 paid models into the picker).
-		if (req.method === "GET" && (req.url === "/v1/models" || req.url === "/v1/models/")) {
-			const body = JSON.stringify({ object: "list", data: aliveCatalog.map((m) => ({ id: m.id, object: "model", created: 0, owned_by: "bansos" })) });
-			res.writeHead(200, { "content-type": "application/json", "content-length": Buffer.byteLength(body) });
+		if (
+			req.method === "GET" &&
+			(req.url === "/v1/models" || req.url === "/v1/models/")
+		) {
+			const body = JSON.stringify({
+				object: "list",
+				data: aliveCatalog.map((m) => ({
+					id: m.id,
+					object: "model",
+					created: 0,
+					owned_by: "bansos",
+				})),
+			});
+			res.writeHead(200, {
+				"content-type": "application/json",
+				"content-length": Buffer.byteLength(body),
+			});
 			res.end(body);
 			return;
 		}
@@ -464,12 +698,15 @@ function startProxy(overridePort?: number): Promise<{ server: http.Server; port:
 			let isMimo = false;
 			let isKilo = false;
 			let parsedBody: any = null;
-			
+
 			try {
 				parsedBody = JSON.parse(bodyStr);
 				if (parsedBody.model === "mimo-auto") {
 					isMimo = true;
-				} else if (typeof parsedBody.model === "string" && KILO_MODEL_IDS.has(parsedBody.model)) {
+				} else if (
+					typeof parsedBody.model === "string" &&
+					KILO_MODEL_IDS.has(parsedBody.model)
+				) {
 					isKilo = true;
 				}
 			} catch {}
@@ -483,10 +720,10 @@ function startProxy(overridePort?: number): Promise<{ server: http.Server; port:
 
 					const buildHeaders = (token: string) => ({
 						"Content-Type": "application/json",
-						"Authorization": `Bearer ${token}`,
+						Authorization: `Bearer ${token}`,
 						"X-Mimo-Source": "mimocode-cli-free",
 						"x-session-affinity": getSessionId(),
-						"Accept": isStream ? "text/event-stream" : "application/json",
+						Accept: isStream ? "text/event-stream" : "application/json",
 					});
 
 					const doFetch = (token: string) =>
@@ -509,16 +746,24 @@ function startProxy(overridePort?: number): Promise<{ server: http.Server; port:
 
 					// Pipe streaming SSE as-is, or buffer JSON
 					if (isStream && response.body) {
-						const ct = response.headers.get("content-type") || "text/event-stream";
+						const ct =
+							response.headers.get("content-type") || "text/event-stream";
 						res.writeHead(response.status, {
 							"content-type": ct,
 							"cache-control": "no-cache",
 							"x-accel-buffering": "no",
 						});
-						pipeUpstreamStream(Readable.fromWeb(response.body as unknown as import("stream/web").ReadableStream), res, req);
+						pipeUpstreamStream(
+							Readable.fromWeb(
+								response.body as unknown as import("stream/web").ReadableStream,
+							),
+							res,
+							req,
+						);
 					} else {
 						const data = await response.text();
-						const ct = response.headers.get("content-type") || "application/json";
+						const ct =
+							response.headers.get("content-type") || "application/json";
 						res.writeHead(response.status, { "content-type": ct });
 						res.end(data);
 					}
@@ -527,21 +772,32 @@ function startProxy(overridePort?: number): Promise<{ server: http.Server; port:
 					const isStream = parsedBody.stream === true;
 					const response = await relayFetch(KILO_CHAT_URL, {
 						method: "POST",
-						headers: { "Content-Type": "application/json", "Authorization": "Bearer kilo-free" },
+						headers: {
+							"Content-Type": "application/json",
+							Authorization: "Bearer kilo-free",
+						},
 						body: JSON.stringify(parsedBody),
 						signal: AbortSignal.timeout(300_000),
 					});
 					if (isStream && response.body) {
-						const ct = response.headers.get("content-type") || "text/event-stream";
+						const ct =
+							response.headers.get("content-type") || "text/event-stream";
 						res.writeHead(response.status, {
 							"content-type": ct,
 							"cache-control": "no-cache",
 							"x-accel-buffering": "no",
 						});
-						pipeUpstreamStream(Readable.fromWeb(response.body as unknown as import("stream/web").ReadableStream), res, req);
+						pipeUpstreamStream(
+							Readable.fromWeb(
+								response.body as unknown as import("stream/web").ReadableStream,
+							),
+							res,
+							req,
+						);
 					} else {
 						const data = await response.text();
-						const ct = response.headers.get("content-type") || "application/json";
+						const ct =
+							response.headers.get("content-type") || "application/json";
 						res.writeHead(response.status, { "content-type": ct });
 						res.end(data);
 					}
@@ -549,7 +805,10 @@ function startProxy(overridePort?: number): Promise<{ server: http.Server; port:
 					// OpenCode routing — relay (fetch-based) when enabled, else direct (existing, untouched)
 					if (relayState.enabled && relayState.url) {
 						const fullUrl = `${UPSTREAM_OPENCODE}${req.url ?? "/"}`;
-						const relayHeaders = sanitizeHeaders(req.headers, new URL(relayState.url).host);
+						const relayHeaders = sanitizeHeaders(
+							req.headers,
+							new URL(relayState.url).host,
+						);
 						try {
 							const response = await relayFetch(fullUrl, {
 								method: req.method || "POST",
@@ -557,10 +816,21 @@ function startProxy(overridePort?: number): Promise<{ server: http.Server; port:
 								body: bodyChunks.length ? Buffer.concat(bodyChunks) : undefined,
 								signal: AbortSignal.timeout(300_000),
 							});
-							const ct = response.headers.get("content-type") || "application/json";
+							const ct =
+								response.headers.get("content-type") || "application/json";
 							if (response.body) {
-								res.writeHead(response.status, { "content-type": ct, "cache-control": "no-cache", "x-accel-buffering": "no" });
-								pipeUpstreamStream(Readable.fromWeb(response.body as unknown as import("stream/web").ReadableStream), res, req);
+								res.writeHead(response.status, {
+									"content-type": ct,
+									"cache-control": "no-cache",
+									"x-accel-buffering": "no",
+								});
+								pipeUpstreamStream(
+									Readable.fromWeb(
+										response.body as unknown as import("stream/web").ReadableStream,
+									),
+									res,
+									req,
+								);
 							} else {
 								const data = await response.text();
 								res.writeHead(response.status, { "content-type": ct });
@@ -568,38 +838,55 @@ function startProxy(overridePort?: number): Promise<{ server: http.Server; port:
 							}
 							return; // relay handled the response
 						} catch (e) {
-							log("warn", "opencode relay failed, falling back to direct", { error: String(e) });
+							log("warn", "opencode relay failed, falling back to direct", {
+								error: String(e),
+							});
 							if (res.headersSent) return; // can't recover mid-stream
 						}
 					}
 					// direct path (existing, untouched)
 					const fwd = sanitizeHeaders(req.headers, target.hostname);
-					const proxy = https.request({
-						method: req.method,
-						hostname: target.hostname,
-						port: 443,
-						path: target.pathname + target.search,
-						headers: fwd,
-					}, (upstream) => {
-						const outHeaders: Record<string, string> = {};
-						for (const h of ["content-type", "cache-control", "x-request-id"]) {
-							const val = upstream.headers[h];
-							if (typeof val === "string") outHeaders[h] = val;
-						}
-						outHeaders["x-content-type-options"] = "nosniff";
-						res.writeHead(upstream.statusCode ?? 502, outHeaders);
-						upstream.pipe(res);
+					const proxy = https.request(
+						{
+							method: req.method,
+							hostname: target.hostname,
+							port: 443,
+							path: target.pathname + target.search,
+							headers: fwd,
+						},
+						(upstream) => {
+							const outHeaders: Record<string, string> = {};
+							for (const h of [
+								"content-type",
+								"cache-control",
+								"x-request-id",
+							]) {
+								const val = upstream.headers[h];
+								if (typeof val === "string") outHeaders[h] = val;
+							}
+							outHeaders["x-content-type-options"] = "nosniff";
+							res.writeHead(upstream.statusCode ?? 502, outHeaders);
+							upstream.pipe(res);
+						},
+					);
+					proxy.on("error", () => {
+						res.writeHead(502, { "content-type": "application/json" });
+						res.end(JSON.stringify({ error: "upstream error" }));
 					});
-					proxy.on("error", () => { res.writeHead(502, { "content-type": "application/json" }); res.end(JSON.stringify({ error: "upstream error" })); });
-					proxy.setTimeout(30_000, () => { proxy.destroy(new Error("timeout")); });
-					req.on("aborted", () => { if (!proxy.destroyed) proxy.destroy(); });
+					proxy.setTimeout(30_000, () => {
+						proxy.destroy(new Error("timeout"));
+					});
+					req.on("aborted", () => {
+						if (!proxy.destroyed) proxy.destroy();
+					});
 					// ponytail: body already buffered in bodyChunks above for model routing;
 					// req is drained so pipe() would send an empty body → upstream hang → 502.
 					proxy.end(Buffer.concat(bodyChunks));
 				}
 			} catch (err) {
 				log("error", "proxy error", { error: String(err) });
-				if (!res.headersSent) res.writeHead(502, { "content-type": "application/json" });
+				if (!res.headersSent)
+					res.writeHead(502, { "content-type": "application/json" });
 				res.end(JSON.stringify({ error: "internal error" }));
 			}
 		});
@@ -648,7 +935,10 @@ export default async function (pi: ExtensionAPI) {
 		server = r.server;
 		actualPort = r.port;
 	} catch {
-		log("error", "extension inactive — could not bind proxy port. resolve the port conflict and restart pi.");
+		log(
+			"error",
+			"extension inactive — could not bind proxy port. resolve the port conflict and restart pi.",
+		);
 		return;
 	}
 
@@ -685,56 +975,72 @@ export default async function (pi: ExtensionAPI) {
 		}),
 	);
 
-	const aliveModels = [...opencodeChecks, ...mimoChecks, ...kiloChecks].filter((m) => m.alive);
+	const aliveModels = [...opencodeChecks, ...mimoChecks, ...kiloChecks].filter(
+		(m) => m.alive,
+	);
 	aliveCatalog = aliveModels;
 
 	if (aliveModels.length === 0) {
 		// Don't bail: still register /bansos below so the user can recover
 		// (e.g. switch the relay off) instead of being stranded with no command.
-		log("warn", "no alive models found — provider inactive; /bansos still available to switch relay off / go direct");
+		log(
+			"warn",
+			"no alive models found — provider inactive; /bansos still available to switch relay off / go direct",
+		);
 	} else {
-	log("info", `${aliveModels.length} model(s) registered: ${aliveModels.map((m) => m.id).join(", ")}`);
+		log(
+			"info",
+			`${aliveModels.length} model(s) registered: ${aliveModels.map((m) => m.id).join(", ")}`,
+		);
 
-	pi.registerProvider("bansos", {
-		baseUrl: `http://${HOST}:${actualPort}/v1`,
-		apiKey: "placeholder",
-		api: "openai-completions",
-		compat: { supportsDeveloperRole: false },
-		models: aliveModels.map((m) => ({
-			id: m.id,
-			name: m.name,
-			reasoning: m.reasoning,
-			input: ["text"] as ("text" | "image")[],
-			contextWindow: m.contextWindow,
-			maxTokens: m.maxTokens,
-			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
-			compat: m.thinkingFormat
-				? { supportsDeveloperRole: false, thinkingFormat: m.thinkingFormat }
-				: m.source === "kilo"
-					? { supportsDeveloperRole: false, supportsReasoningEffort: false }
-					: { supportsDeveloperRole: false, supportsReasoningEffort: true },
-		})),
-	});
+		pi.registerProvider("bansos", {
+			baseUrl: `http://${HOST}:${actualPort}/v1`,
+			apiKey: "placeholder",
+			api: "openai-completions",
+			compat: { supportsDeveloperRole: false },
+			models: aliveModels.map((m) => ({
+				id: m.id,
+				name: m.name,
+				reasoning: m.reasoning,
+				input: ["text"] as ("text" | "image")[],
+				contextWindow: m.contextWindow,
+				maxTokens: m.maxTokens,
+				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+				compat: m.thinkingFormat
+					? { supportsDeveloperRole: false, thinkingFormat: m.thinkingFormat }
+					: m.source === "kilo"
+						? { supportsDeveloperRole: false, supportsReasoningEffort: false }
+						: { supportsDeveloperRole: false, supportsReasoningEffort: true },
+			})),
+		});
 	}
 
 	// ── /bansos command: toggle relay egress live (on|off|status|url [URL]) ───
 	pi.registerCommand("bansos", {
-		description: "Relay egress: on | off | status | url [URL] | deploy | list | use <URL> | remove <URL>",
+		description:
+			"Relay egress: on | off | status | url [URL] | deploy | list | use <URL> | remove <URL>",
 		getArgumentCompletions: (prefix: string) =>
 			["on", "off", "status", "url", "deploy", "list", "use", "remove"]
-				.filter((s) => s.startsWith(prefix)).map((s) => ({ value: s, label: s })),
+				.filter((s) => s.startsWith(prefix))
+				.map((s) => ({ value: s, label: s })),
 		handler: async (args: string, ctx) => {
-			const parts = String(args || "").trim().split(/\s+/);
+			const parts = String(args || "")
+				.trim()
+				.split(/\s+/);
 			const sub = parts[0] || "";
 			const rest = parts.slice(1).join(" ");
 
-			const flash = () => ctx.ui.notify(
-				`Relay ${relayState.enabled ? "ON" : "OFF"}${relayState.enabled ? ` → ${relayState.url}` : " (direct)"} | hits=${relayHits} | saved=${relayState.relays.length}`,
-				"info",
-			);
+			const flash = () =>
+				ctx.ui.notify(
+					`Relay ${relayState.enabled ? "ON" : "OFF"}${relayState.enabled ? ` → ${relayState.url}` : " (direct)"} | hits=${relayHits} | saved=${relayState.relays.length}`,
+					"info",
+				);
 			const persist = () => {
 				saveRelayState(relayState);
-				ctx.ui.setStatus("bansos", `relay: ${relayState.enabled ? "ON" : "OFF"}`);
+				ctx.ui.setStatus(
+					"bansos",
+					`relay: ${relayState.enabled ? "ON" : "OFF"}`,
+				);
 			};
 			// mutate in place so the saved-relays list is preserved across switches
 			const setRelay = (enabled: boolean, url: string, addLabel?: string) => {
@@ -745,71 +1051,151 @@ export default async function (pi: ExtensionAPI) {
 			const doDeploy = async () => {
 				// Token prompted (not stored). pi's input has no secret mode — shows while typing.
 				const defaultName = `relay-${Date.now().toString(36)}`;
-				const token = (await ctx.ui.input("Vercel API token (vercel-…):", ""))?.trim();
-				if (!token) { ctx.ui.notify("Deploy cancelled — no token", "warning"); return; }
-				const name = ((await ctx.ui.input("Project name (empty = auto):", defaultName))?.trim()) || defaultName;
+				const token = (
+					await ctx.ui.input("Vercel API token (vercel-…):", "")
+				)?.trim();
+				if (!token) {
+					ctx.ui.notify("Deploy cancelled — no token", "warning");
+					return;
+				}
+				const name =
+					(
+						await ctx.ui.input("Project name (empty = auto):", defaultName)
+					)?.trim() || defaultName;
 				ctx.ui.setStatus("bansos", "deploying relay…");
 				try {
-					const url = await deployVercelRelay(token, name, (m) => ctx.ui.notify(m, "info"));
+					const url = await deployVercelRelay(token, name, (m) =>
+						ctx.ui.notify(m, "info"),
+					);
 					setRelay(true, url, `deployed ${name}`);
 					persist();
 					ctx.ui.notify(`✓ Deployed & active: ${url}`, "info");
 				} catch (e) {
-					ctx.ui.setStatus("bansos", `relay: ${relayState.enabled ? "ON" : "OFF"}`);
+					ctx.ui.setStatus(
+						"bansos",
+						`relay: ${relayState.enabled ? "ON" : "OFF"}`,
+					);
 					ctx.ui.notify(`Deploy failed: ${(e as Error).message}`, "error");
 				}
 			};
 			const switchRelay = async () => {
-				if (!relayState.relays.length) { ctx.ui.notify("No saved relays yet", "warning"); return; }
-				const fmt = (r: KnownRelay) => `${r.url === relayState.url ? "★ " : "  "}${r.url}${r.label ? `  (${r.label})` : ""}`;
+				if (!relayState.relays.length) {
+					ctx.ui.notify("No saved relays yet", "warning");
+					return;
+				}
+				const fmt = (r: KnownRelay) =>
+					`${r.url === relayState.url ? "★ " : "  "}${r.url}${r.label ? `  (${r.label})` : ""}`;
 				const opts = relayState.relays.map(fmt);
 				const choice = await ctx.ui.select("Switch relay", opts);
 				if (!choice) return;
 				const match = relayState.relays.find((r) => fmt(r) === choice);
 				if (!match) return;
 				setRelay(true, match.url);
-				persist(); flash();
+				persist();
+				flash();
 			};
 			const showList = () => {
-				if (!relayState.relays.length) { ctx.ui.notify("No saved relays", "info"); return; }
-				const lines = relayState.relays.map((r) => `${r.url === relayState.url ? "★" : " "} ${r.url}${r.label ? `  [${r.label}]` : ""}`);
-				ctx.ui.notify(`Saved relays (${relayState.relays.length}):\n${lines.join("\n")}`, "info");
+				if (!relayState.relays.length) {
+					ctx.ui.notify("No saved relays", "info");
+					return;
+				}
+				const lines = relayState.relays.map(
+					(r) =>
+						`${r.url === relayState.url ? "★" : " "} ${r.url}${r.label ? `  [${r.label}]` : ""}`,
+				);
+				ctx.ui.notify(
+					`Saved relays (${relayState.relays.length}):\n${lines.join("\n")}`,
+					"info",
+				);
 			};
 			const removeRelayMenu = async () => {
-				const removable = relayState.relays.filter((r) => r.url !== relayState.url);
-				if (!removable.length) { ctx.ui.notify("Nothing to remove — the active relay can't be removed (switch first)", "warning"); return; }
-				const fmt = (r: KnownRelay) => `${r.url}${r.label ? `  (${r.label})` : ""}`;
+				const removable = relayState.relays.filter(
+					(r) => r.url !== relayState.url,
+				);
+				if (!removable.length) {
+					ctx.ui.notify(
+						"Nothing to remove — the active relay can't be removed (switch first)",
+						"warning",
+					);
+					return;
+				}
+				const fmt = (r: KnownRelay) =>
+					`${r.url}${r.label ? `  (${r.label})` : ""}`;
 				const choice = await ctx.ui.select("Remove relay", removable.map(fmt));
 				if (!choice) return;
 				const match = removable.find((r) => fmt(r) === choice);
 				if (!match) return;
-				removeRelay(relayState, match.url); persist();
+				removeRelay(relayState, match.url);
+				persist();
 				ctx.ui.notify(`Removed: ${match.url}`, "info");
 			};
 
-			if (sub === "on") { setRelay(true, relayState.url || DEFAULT_RELAY_URL); persist(); flash(); }
-			else if (sub === "off") { relayState.enabled = false; persist(); flash(); }
-			else if (sub === "status") { flash(); }
-			else if (sub === "list") { showList(); }
-			else if (sub === "use") {
-				const url = (rest || (await ctx.ui.input("Relay URL to activate:", "")) || "").trim();
-				if (!url) { ctx.ui.notify("No URL given", "warning"); return; }
-				setRelay(true, url, "manual"); persist(); flash();
-			}
-			else if (sub === "remove") {
-				const url = (rest || (await ctx.ui.input("Relay URL to remove:", "")) || "").trim();
-				if (!url) { ctx.ui.notify("No URL given", "warning"); return; }
-				if (url === relayState.url) { ctx.ui.notify("Can't remove the active relay — switch first", "warning"); return; }
-				if (!relayState.relays.some((r) => r.url === url)) { ctx.ui.notify("Not in saved list", "warning"); return; }
-				removeRelay(relayState, url); persist();
+			if (sub === "on") {
+				setRelay(true, relayState.url || DEFAULT_RELAY_URL);
+				persist();
+				flash();
+			} else if (sub === "off") {
+				relayState.enabled = false;
+				persist();
+				flash();
+			} else if (sub === "status") {
+				flash();
+			} else if (sub === "list") {
+				showList();
+			} else if (sub === "use") {
+				const url = (
+					rest ||
+					(await ctx.ui.input("Relay URL to activate:", "")) ||
+					""
+				).trim();
+				if (!url) {
+					ctx.ui.notify("No URL given", "warning");
+					return;
+				}
+				setRelay(true, url, "manual");
+				persist();
+				flash();
+			} else if (sub === "remove") {
+				const url = (
+					rest ||
+					(await ctx.ui.input("Relay URL to remove:", "")) ||
+					""
+				).trim();
+				if (!url) {
+					ctx.ui.notify("No URL given", "warning");
+					return;
+				}
+				if (url === relayState.url) {
+					ctx.ui.notify(
+						"Can't remove the active relay — switch first",
+						"warning",
+					);
+					return;
+				}
+				if (!relayState.relays.some((r) => r.url === url)) {
+					ctx.ui.notify("Not in saved list", "warning");
+					return;
+				}
+				removeRelay(relayState, url);
+				persist();
 				ctx.ui.notify(`Removed: ${url}`, "info");
-			}
-			else if (sub === "url") {
-				const input = rest || (await ctx.ui.input("Relay URL (empty = default):", relayState.url || DEFAULT_RELAY_URL));
-				setRelay(relayState.enabled, (input || "").trim() || DEFAULT_RELAY_URL, "manual"); persist(); flash();
-			}
-			else if (sub === "deploy") { await doDeploy(); }
-			else {
+			} else if (sub === "url") {
+				const input =
+					rest ||
+					(await ctx.ui.input(
+						"Relay URL (empty = default):",
+						relayState.url || DEFAULT_RELAY_URL,
+					));
+				setRelay(
+					relayState.enabled,
+					(input || "").trim() || DEFAULT_RELAY_URL,
+					"manual",
+				);
+				persist();
+				flash();
+			} else if (sub === "deploy") {
+				await doDeploy();
+			} else {
 				const choice = await ctx.ui.select("bansos relay", [
 					`Relay: ${relayState.enabled ? "ON" : "OFF"} → ${relayState.url || "direct"}`,
 					"Turn ON",
@@ -820,25 +1206,50 @@ export default async function (pi: ExtensionAPI) {
 					"Deploy Vercel relay…",
 					"List saved relays",
 				]);
-				if (choice === "Turn ON") { setRelay(true, relayState.url || DEFAULT_RELAY_URL); persist(); flash(); }
-				else if (choice === "Turn OFF") { relayState.enabled = false; persist(); flash(); }
-				else if (choice === "Switch relay…") { await switchRelay(); }
-				else if (choice === "Remove relay…") { await removeRelayMenu(); }
-				else if (choice === "Set URL") {
-					const input = await ctx.ui.input("Relay URL (empty = default):", relayState.url || DEFAULT_RELAY_URL);
-					setRelay(relayState.enabled, (input || "").trim() || DEFAULT_RELAY_URL, "manual"); persist(); flash();
+				if (choice === "Turn ON") {
+					setRelay(true, relayState.url || DEFAULT_RELAY_URL);
+					persist();
+					flash();
+				} else if (choice === "Turn OFF") {
+					relayState.enabled = false;
+					persist();
+					flash();
+				} else if (choice === "Switch relay…") {
+					await switchRelay();
+				} else if (choice === "Remove relay…") {
+					await removeRelayMenu();
+				} else if (choice === "Set URL") {
+					const input = await ctx.ui.input(
+						"Relay URL (empty = default):",
+						relayState.url || DEFAULT_RELAY_URL,
+					);
+					setRelay(
+						relayState.enabled,
+						(input || "").trim() || DEFAULT_RELAY_URL,
+						"manual",
+					);
+					persist();
+					flash();
+				} else if (choice === "Deploy Vercel relay…") {
+					await doDeploy();
+				} else if (choice === "List saved relays") {
+					showList();
 				}
-				else if (choice === "Deploy Vercel relay…") { await doDeploy(); }
-				else if (choice === "List saved relays") { showList(); }
 			}
-		}
+		},
 	});
 
 	// reload persisted state on session start/resume (env overrides still win)
 	pi.on("session_start", async (_event, ctx) => {
 		relayState = resolveRelayState();
-		ctx.ui?.setStatus?.("bansos", `relay: ${relayState.enabled ? "ON" : "OFF"}`);
-		log("info", `relay ${relayState.enabled ? "ON" : "OFF"} → ${relayState.url || "direct"}`);
+		ctx.ui?.setStatus?.(
+			"bansos",
+			`relay: ${relayState.enabled ? "ON" : "OFF"}`,
+		);
+		log(
+			"info",
+			`relay ${relayState.enabled ? "ON" : "OFF"} → ${relayState.url || "direct"}`,
+		);
 	});
 
 	pi.on("session_shutdown", () => {
