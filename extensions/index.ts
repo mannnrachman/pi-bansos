@@ -32,14 +32,27 @@ const MIMO_SYSTEM_MARKER =
 // No built-in default relay — a published package must not bake in any one
 // user's personal relay URL. Bring your own via /bansos deploy or /bansos url.
 const DEFAULT_RELAY_URL = "";
-// State lives at the package root (parent of this extensions/ dir) — NOT under
-// extensions/ (which is in package.json "files" and would get published). Resolved
-// at runtime from the module's own location, so it works in dev and when installed.
-const RELAY_STATE_FILE = path.join(
-	path.dirname(fileURLToPath(import.meta.url)),
-	"..",
-	".relay-state.json",
-);
+// State lives OUTSIDE the package dir so npm updates don't wipe it.
+// Uses ~/.pi/agent/pi-bansos-relay-state.json (stable), falls back to
+// package-root .relay-state.json for dev/local installs.
+function resolveRelayStatePath(): string {
+	try {
+		return path.join(
+			homedir(),
+			".pi",
+			"agent",
+			"pi-bansos-relay-state.json",
+		);
+	} catch {
+		// homedir() unavailable — fallback to package root (dev mode)
+		return path.join(
+			path.dirname(fileURLToPath(import.meta.url)),
+			"..",
+			".relay-state.json",
+		);
+	}
+}
+const RELAY_STATE_FILE = resolveRelayStatePath();
 
 type KnownRelay = { url: string; label?: string; addedAt?: string };
 type RelayState = { enabled: boolean; url: string; relays: KnownRelay[] };
