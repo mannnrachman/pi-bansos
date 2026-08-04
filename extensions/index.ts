@@ -883,8 +883,12 @@ function startProxy(
 						},
 					);
 					proxy.on("error", () => {
-						res.writeHead(502, { "content-type": "application/json" });
-						res.end(JSON.stringify({ error: "upstream error" }));
+						if (!res.headersSent) {
+							res.writeHead(502, { "content-type": "application/json" });
+							res.end(JSON.stringify({ error: "upstream error" }));
+						} else if (!res.writableEnded) {
+							res.end();
+						}
 					});
 					proxy.setTimeout(30_000, () => {
 						proxy.destroy(new Error("timeout"));
