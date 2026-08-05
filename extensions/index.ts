@@ -132,7 +132,7 @@ async function relayFetch(
 const VERCEL_API = "https://api.vercel.com";
 const VERCEL_RELAY_WORKER = `// Only the 3 upstreams pi-bansos talks to. Anything else = open proxy abuse.
 const ALLOWED_TARGETS = ["https://opencode.ai", "https://api.xiaomimimo.com", "https://api.kilo.ai"];
-export const config = { runtime: "nodejs", maxDuration: 300 };
+export const config = { runtime: "edge" };
 export default async function handler(req) {
   const target = req.headers.get("x-relay-target");
   const relayPath = req.headers.get("x-relay-path") || "/";
@@ -173,9 +173,6 @@ async function deployVercelRelay(
 					file: "vercel.json",
 					data: JSON.stringify({
 						rewrites: [{ source: "/(.*)", destination: "/api/relay" }],
-						functions: {
-							"api/relay.js": { runtime: "nodejs22.x", maxDuration: 300 },
-						},
 					}),
 				},
 			],
@@ -417,6 +414,11 @@ function log(level: LogLevel, message: string, meta?: Record<string, unknown>) {
 const rateLimitMap = new Map<string, { count: number; resetAt: number }>();
 const RATE_LIMIT_WINDOW_MS = 60_000;
 const RATE_LIMIT_MAX = 120;
+
+// ponytail: Vercel relay rejects requests that ask for very large max_tokens
+// (response body / duration limits). Clamp at relay layer so direct mode stays
+// unconstrained and model config (KNOWN_MODELS) stays accurate.
+const RELAY_MAX_TOKENS = 131_072;
 
 function checkRateLimit(ip: string): boolean {
 	const now = Date.now();
@@ -823,10 +825,22 @@ function startProxy(
 							new URL(relayState.url).host,
 						);
 						try {
+							// ponytail: clamp max_tokens for Vercel relay — large values
+							// cause 400 "Upstream request failed" (response size / duration
+							// limits). Direct mode stays unconstrained.
+							let relayBody = bodyChunks.length ? Buffer.concat(bodyChunks) : undefined;
+							if (relayBody && parsedBody) {
+								const mt = parsedBody.max_tokens ?? parsedBody.maxTokens;
+								if (typeof mt === "number" && mt > RELAY_MAX_TOKENS) {
+									parsedBody.max_tokens = RELAY_MAX_TOKENS;
+									relayBody = Buffer.from(JSON.stringify(parsedBody));
+									log("info", `clamped max_tokens ${mt} → ${RELAY_MAX_TOKENS} for relay`);
+								}
+							}
 							const response = await relayFetch(fullUrl, {
 								method: req.method || "POST",
 								headers: relayHeaders,
-								body: bodyChunks.length ? Buffer.concat(bodyChunks) : undefined,
+								body: relayBody,
 								signal: AbortSignal.timeout(300_000),
 							});
 							const ct =
