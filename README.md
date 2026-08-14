@@ -1,8 +1,8 @@
 # pi-bansos
 
-Free model provider for [**pi**](https://pi.dev) ([browse packages](https://pi.dev/packages)). It adds a `bansos` provider with live free models from **3 upstreams** — OpenCode Zen, Xiaomi MiMo Free, and KiloCode gateway — through a local OpenAI-compatible proxy.
+Free model provider for [**pi**](https://pi.dev) ([browse packages](https://pi.dev/packages)). It adds a `bansos` provider with live free models from **2 upstreams** — OpenCode Zen and KiloCode gateway — through a local OpenAI-compatible proxy.
 
-## Models (17 total)
+## Models (16 total)
 
 All models are **free, no API key required**. pi-bansos health-checks every model at startup and only registers the ones that are currently alive.
 
@@ -17,14 +17,6 @@ All models are **free, no API key required**. pi-bansos health-checks every mode
 | `big-pickle` | Big Pickle | 200K tokens | 32K tokens | ✅ |
 | `ling-3.0-flash-free` | Ling 3.0 Flash | 262K tokens | 32K tokens | ✅ |
 | `laguna-s-2.1-free` | Laguna S 2.1 | 262K tokens | 32K tokens | ✅ |
-
-### Xiaomi MiMo Free (1 model)
-
-| Model ID | Name | Context | Max Output | Reasoning |
-|----------|------|---------|------------|-----------|
-| `mimo-auto` | MiMo Auto (Free) | 1M tokens | 131K tokens | ❌ |
-
-> Auto-selects the best available MiMo model behind the scenes.
 
 ### KiloCode Gateway (9 models)
 
@@ -48,7 +40,7 @@ Keyless — no API key needed. 200 requests/hour per IP.
 
 - **Zero cost** — all models free, no API key needed for supported upstreams
 - **Auto health-check** — only alive models registered at startup; dead ones skipped silently
-- **17 models from 3 sources** — OpenCode Zen + MiMo Free + KiloCode gateway
+- **16 models from 2 sources** — OpenCode Zen + KiloCode gateway
 - **Local-only proxy** — binds to `127.0.0.1`, nothing exposed externally
 - **Optional relay egress** — route through a Vercel/Cloudflare relay to dodge per-IP rate limits, toggled live via `/bansos`
 - **Auto port bump** — if port 18080 is taken, automatically tries the next one (up to 18100)
@@ -128,7 +120,6 @@ Deploys your own Node.js relay to Vercel and activates it immediately. It asks f
 - Free upstream models are best-effort: promos can expire, model IDs can change, and rate limits may apply
 - pi-bansos health-checks at startup so unavailable models are skipped instead of registered
 - KiloCode gateway: 200 req/hr per IP, keyless
-- MiMo Free: uses session affinity (Xiaomi rate-limit mechanism), auto-refreshes JWT
 
 ## Uninstall
 

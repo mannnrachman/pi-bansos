@@ -1,29 +1,39 @@
 /**
- * bansos — pi extension (with mimo-free + kilo free support)
+ * bansos — pi extension (with KiloCode free support)
  *
- * OpenCode models + Mimo Free (xiaomi) + KiloCode gateway free models
+ * OpenCode models + KiloCode gateway free models
  */
+import { randomUUID } from "node:crypto";
+import fs from "node:fs";
 import http from "node:http";
 import https from "node:https";
-import fs from "node:fs";
+import { homedir } from "node:os";
 import path from "node:path";
-import { fileURLToPath } from "node:url";
 import { Readable } from "node:stream";
-import { createHash } from "node:crypto";
-import os from "node:os";
+import { fileURLToPath } from "node:url";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 
 // ── Configuration ──────────────────────────────────────────────────
 const UPSTREAM_OPENCODE = "https://opencode.ai/zen";
-const MIMO_CHAT_URL = "https://api.xiaomimimo.com/api/free-ai/openai/chat";
-const MIMO_BOOTSTRAP_URL = "https://api.xiaomimimo.com/api/free-ai/bootstrap";
 // KiloCode gateway — OpenAI-compatible; free models are keyless (200 req/hr per IP)
 const KILO_CHAT_URL = "https://api.kilo.ai/api/gateway/chat/completions";
 const PORT = Number(process.env.BANSOS_PORT) || 18080;
 const HOST = "127.0.0.1";
 const API = `${UPSTREAM_OPENCODE}/v1`;
-const MIMO_SYSTEM_MARKER =
-	"You are MiMoCode, an interactive CLI tool that helps users with software engineering tasks.";
+const OPENCODE_USER_AGENT = "opencode/latest/1.14.50/cli";
+const OPENCODE_CLIENT = "cli";
+const OPENCODE_PROJECT = "default";
+const OPENCODE_SESSION = randomUUID();
+
+function opencodeHeaders(): Record<string, string> {
+	return {
+		"User-Agent": OPENCODE_USER_AGENT,
+		"x-opencode-client": OPENCODE_CLIENT,
+		"x-opencode-project": OPENCODE_PROJECT,
+		"x-opencode-session": OPENCODE_SESSION,
+		"x-opencode-request": randomUUID(),
+	};
+}
 
 // ── Relay egress (vercel/cloudflare worker, x-relay-target pattern) ──────────
 // Same logic as 9router ProxyFetch: when enabled, redirect upstream calls to a
@@ -37,12 +47,7 @@ const DEFAULT_RELAY_URL = "";
 // package-root .relay-state.json for dev/local installs.
 function resolveRelayStatePath(): string {
 	try {
-		return path.join(
-			homedir(),
-			".pi",
-			"agent",
-			"pi-bansos-relay-state.json",
-		);
+		return path.join(homedir(), ".pi", "agent", "pi-bansos-relay-state.json");
 	} catch {
 		// homedir() unavailable — fallback to package root (dev mode)
 		return path.join(
@@ -130,8 +135,8 @@ async function relayFetch(
 // the relay state and activated. Worker uses the x-relay-target/x-relay-path
 // pattern, identical to the cloudflare/vercel relays 9Router deploys.
 const VERCEL_API = "https://api.vercel.com";
-const VERCEL_RELAY_WORKER = `// Only the 3 upstreams pi-bansos talks to. Anything else = open proxy abuse.
-const ALLOWED_TARGETS = ["https://opencode.ai", "https://api.xiaomimimo.com", "https://api.kilo.ai"];
+const VERCEL_RELAY_WORKER = `// Only the 2 upstreams pi-bansos talks to. Anything else = open proxy abuse.
+const ALLOWED_TARGETS = ["https://opencode.ai", "https://api.kilo.ai"];
 export const config = { runtime: "edge" };
 export default async function handler(req) {
   const target = req.headers.get("x-relay-target");
@@ -213,27 +218,6 @@ async function deployVercelRelay(
 	throw new Error("Deployment timed out (120s)");
 }
 
-// Session affinity (per 9router mimo-free.js) — Xiaomi uses this for rate limit / anti-abuse
-const SESSION_AFFINITY_PREFIX = "ses_";
-const SESSION_ID_LENGTH = 24;
-const SESSION_CHARS = "abcdefghijklmnopqrstuvwxyz0123456789";
-
-function generateSessionId(): string {
-	let id = SESSION_AFFINITY_PREFIX;
-	for (let i = 0; i < SESSION_ID_LENGTH; i++) {
-		id += SESSION_CHARS[Math.floor(Math.random() * SESSION_CHARS.length)];
-	}
-	return id;
-}
-
-let cachedSessionId: string | null = null;
-function getSessionId(): string {
-	if (!cachedSessionId) cachedSessionId = generateSessionId();
-	return cachedSessionId;
-}
-
-const JWT_EXPIRY_BUFFER_MS = 5 * 60 * 1000; // 5 min buffer (per 9router)
-
 // ── Model Definitions ──────────────────────────────────────────────
 interface ModelDef {
 	id: string;
@@ -294,18 +278,6 @@ const KNOWN_MODELS: ModelDef[] = [
 		reasoning: true,
 		contextWindow: 262_144,
 		maxTokens: 32_768,
-	},
-];
-
-// Mimo Free models (from xiaomi free API) — MiMo V2.5: 1M ctx, 128K out
-// Per 9router/open-sse/config/providerModels.js: "free channel only serves mimo-auto"
-const MIMO_MODELS: ModelDef[] = [
-	{
-		id: "mimo-auto",
-		name: "MiMo Auto (Free)",
-		reasoning: false,
-		contextWindow: 1_048_576,
-		maxTokens: 131_072,
 	},
 ];
 
@@ -432,62 +404,7 @@ function checkRateLimit(ip: string): boolean {
 	return true;
 }
 
-// ── Mimo Free JWT ──────────────────────────────────────────────────
-let cachedJwt: string | null = null;
-let jwtExpiresAt = 0;
-
-function generateFingerprint(): string {
-	const username = os.userInfo().username || "unknown";
-	const cpu = os.cpus()[0]?.model || "unknown-cpu";
-	const seed = `${os.hostname()}|${os.platform()}|${os.arch()}|${cpu}|${username}`;
-	return createHash("sha256").update(seed).digest("hex");
-}
-
-// Parse JWT exp claim (per 9router mimo-free.js parseJwtExp)
-function parseJwtExp(jwt: string): number {
-	try {
-		const payload = JSON.parse(
-			Buffer.from(jwt.split(".")[1], "base64").toString(),
-		);
-		if (payload.exp) return payload.exp * 1000;
-	} catch {}
-	return Date.now() + 50 * 60 * 1000; // fallback 50 min
-}
-
-// Setup/health probes go DIRECT (fetch, not relayFetch): they're tiny liveness
-// pings, and relaying them adds a hop whose latency trips the 10s probe timeout
-// on slow models. Only real chat traffic uses the relay (IP masking).
-async function bootstrapJwt(): Promise<string> {
-	if (cachedJwt && Date.now() < jwtExpiresAt - JWT_EXPIRY_BUFFER_MS)
-		return cachedJwt;
-
-	try {
-		const res = await fetch(MIMO_BOOTSTRAP_URL, {
-			method: "POST",
-			headers: { "content-type": "application/json" },
-			body: JSON.stringify({ client: generateFingerprint() }),
-			signal: AbortSignal.timeout(10_000),
-		});
-		if (!res.ok) throw new Error(`bootstrap failed: ${res.status}`);
-		const data = await res.json();
-		if (!data.jwt) throw new Error("no jwt in response");
-
-		cachedJwt = data.jwt;
-		jwtExpiresAt = parseJwtExp(data.jwt);
-		log("info", "mimo JWT obtained");
-		return data.jwt;
-	} catch (err) {
-		log("error", "mimo bootstrap failed", { error: String(err) });
-		throw err;
-	}
-}
-
-function resetJwtCache(): void {
-	cachedJwt = null;
-	jwtExpiresAt = 0;
-}
-
-// ── Health Check (catalog-based: fast, no per-model inference) ─────
+// ── Health Check (OpenCode/Kilo catalogs; no per-model inference) ──
 // Each upstream publishes a model list; fetch it ONCE (cached) and check
 // membership. A 1-token chat probe per model was too slow (large models need
 // 10s+ for the first token). Real usability is validated at chat time (300s).
@@ -497,6 +414,7 @@ function opencodeCatalog(): Promise<Set<string> | null> {
 		opencodeCatalogP = (async () => {
 			try {
 				const r = await fetch(`${API}/models`, {
+					headers: opencodeHeaders(),
 					signal: AbortSignal.timeout(10_000),
 				});
 				if (!r.ok) return null;
@@ -534,12 +452,8 @@ function kiloCatalog(): Promise<Set<string> | null> {
 	return kiloCatalogP;
 }
 
-async function checkModelAlive(id: string, isMimo = false): Promise<boolean> {
+async function checkModelAlive(id: string): Promise<boolean> {
 	try {
-		if (isMimo) {
-			await bootstrapJwt();
-			return true;
-		} // MiMo has no catalog; verify the JWT bootstrap works
 		const cat = await opencodeCatalog();
 		return cat ? cat.has(id) : false;
 	} catch {
@@ -593,25 +507,10 @@ function sanitizeHeaders(
 		else if (Array.isArray(value)) sanitized[lower] = value.join(", ");
 	}
 	sanitized.host = targetHost;
+	Object.assign(sanitized, opencodeHeaders());
 	sanitized["accept-encoding"] = "identity";
 	sanitized.connection = "close";
 	return sanitized;
-}
-
-function injectSystemMarker(body: any): any {
-	const messages = body?.messages;
-	if (!Array.isArray(messages)) return body;
-	const hasMarker = messages.some(
-		(m: any) =>
-			m?.role === "system" &&
-			typeof m.content === "string" &&
-			m.content.includes(MIMO_SYSTEM_MARKER),
-	);
-	if (hasMarker) return body;
-	return {
-		...body,
-		messages: [{ role: "system", content: MIMO_SYSTEM_MARKER }, ...messages],
-	};
 }
 
 // ponytail: shared stream pipe — upstream abort/timeout must end response,
@@ -710,16 +609,13 @@ function startProxy(
 		req.on("data", (chunk: Buffer) => bodyChunks.push(chunk));
 		req.on("end", async () => {
 			const bodyStr = Buffer.concat(bodyChunks).toString();
-			let isMimo = false;
 			let isKilo = false;
-			let parsedBody: any = null;
+			let parsedBody: Record<string, unknown> | null = null;
 
 			try {
 				parsedBody = JSON.parse(bodyStr);
-				if (parsedBody.model === "mimo-auto") {
-					isMimo = true;
-				} else if (
-					typeof parsedBody.model === "string" &&
+				if (
+					typeof parsedBody?.model === "string" &&
 					KILO_MODEL_IDS.has(parsedBody.model)
 				) {
 					isKilo = true;
@@ -727,62 +623,7 @@ function startProxy(
 			} catch {}
 
 			try {
-				if (isMimo) {
-					// Mimo Free routing (Xiaomi upstream)
-					const isStream = parsedBody.stream === true;
-					const jwt = await bootstrapJwt();
-					const transformedBody = injectSystemMarker(parsedBody);
-
-					const buildHeaders = (token: string) => ({
-						"Content-Type": "application/json",
-						Authorization: `Bearer ${token}`,
-						"X-Mimo-Source": "mimocode-cli-free",
-						"x-session-affinity": getSessionId(),
-						Accept: isStream ? "text/event-stream" : "application/json",
-					});
-
-					const doFetch = (token: string) =>
-						relayFetch(MIMO_CHAT_URL, {
-							method: "POST",
-							headers: buildHeaders(token),
-							body: JSON.stringify(transformedBody),
-							signal: AbortSignal.timeout(300_000),
-						});
-
-					let response = await doFetch(jwt);
-
-					// Retry once on auth failure (per 9router mimo-free.js)
-					if (response.status === 401 || response.status === 403) {
-						log("warn", `mimo auth ${response.status}, re-bootstrapping`);
-						resetJwtCache();
-						const retryJwt = await bootstrapJwt();
-						response = await doFetch(retryJwt);
-					}
-
-					// Pipe streaming SSE as-is, or buffer JSON
-					if (isStream && response.body) {
-						const ct =
-							response.headers.get("content-type") || "text/event-stream";
-						res.writeHead(response.status, {
-							"content-type": ct,
-							"cache-control": "no-cache",
-							"x-accel-buffering": "no",
-						});
-						pipeUpstreamStream(
-							Readable.fromWeb(
-								response.body as unknown as import("stream/web").ReadableStream,
-							),
-							res,
-							req,
-						);
-					} else {
-						const data = await response.text();
-						const ct =
-							response.headers.get("content-type") || "application/json";
-						res.writeHead(response.status, { "content-type": ct });
-						res.end(data);
-					}
-				} else if (isKilo) {
+				if (isKilo && parsedBody) {
 					// KiloCode gateway routing (free models are keyless)
 					const isStream = parsedBody.stream === true;
 					const response = await relayFetch(KILO_CHAT_URL, {
@@ -828,13 +669,18 @@ function startProxy(
 							// ponytail: clamp max_tokens for Vercel relay — large values
 							// cause 400 "Upstream request failed" (response size / duration
 							// limits). Direct mode stays unconstrained.
-							let relayBody = bodyChunks.length ? Buffer.concat(bodyChunks) : undefined;
+							let relayBody = bodyChunks.length
+								? Buffer.concat(bodyChunks)
+								: undefined;
 							if (relayBody && parsedBody) {
 								const mt = parsedBody.max_tokens ?? parsedBody.maxTokens;
 								if (typeof mt === "number" && mt > RELAY_MAX_TOKENS) {
 									parsedBody.max_tokens = RELAY_MAX_TOKENS;
 									relayBody = Buffer.from(JSON.stringify(parsedBody));
-									log("info", `clamped max_tokens ${mt} → ${RELAY_MAX_TOKENS} for relay`);
+									log(
+										"info",
+										`clamped max_tokens ${mt} → ${RELAY_MAX_TOKENS} for relay`,
+									);
 								}
 							}
 							const response = await relayFetch(fullUrl, {
@@ -977,21 +823,10 @@ export default async function (pi: ExtensionAPI) {
 	log("info", `checking ${KNOWN_MODELS.length} opencode model(s)...`);
 	const opencodeChecks = await Promise.all(
 		KNOWN_MODELS.map(async (model) => {
-			const alive = await checkModelAlive(model.id, false);
+			const alive = await checkModelAlive(model.id);
 			if (alive) log("info", `✓ ${model.id} is alive`);
 			else log("warn", `✗ ${model.id} is dead — skipping`);
 			return { ...model, alive, source: "opencode" as const };
-		}),
-	);
-
-	// Health check mimo models
-	log("info", `checking ${MIMO_MODELS.length} mimo model(s)...`);
-	const mimoChecks = await Promise.all(
-		MIMO_MODELS.map(async (model) => {
-			const alive = await checkModelAlive(model.id, true);
-			if (alive) log("info", `✓ ${model.id} (mimo-free) is alive`);
-			else log("warn", `✗ ${model.id} (mimo-free) is dead — skipping`);
-			return { ...model, alive, source: "mimo" as const };
 		}),
 	);
 
@@ -1006,9 +841,7 @@ export default async function (pi: ExtensionAPI) {
 		}),
 	);
 
-	const aliveModels = [...opencodeChecks, ...mimoChecks, ...kiloChecks].filter(
-		(m) => m.alive,
-	);
+	const aliveModels = [...opencodeChecks, ...kiloChecks].filter((m) => m.alive);
 	aliveCatalog = aliveModels;
 
 	if (aliveModels.length === 0) {
@@ -1270,7 +1103,7 @@ export default async function (pi: ExtensionAPI) {
 		},
 	});
 
-	// reload persisted state on session start/resume (env overrides still win)
+	// Reload persisted state on session start/resume (env overrides still win).
 	pi.on("session_start", async (_event, ctx) => {
 		relayState = resolveRelayState();
 		ctx.ui?.setStatus?.(
@@ -1280,6 +1113,23 @@ export default async function (pi: ExtensionAPI) {
 		log(
 			"info",
 			`relay ${relayState.enabled ? "ON" : "OFF"} → ${relayState.url || "direct"}`,
+		);
+	});
+
+	// Pi normally pauses after threshold compaction. Queue a follow-up while the
+	// original run is still active so the core agent continues automatically.
+	pi.on("session_compact", (event, ctx) => {
+		if (
+			event.reason !== "threshold" ||
+			event.willRetry ||
+			ctx.isIdle() ||
+			ctx.hasPendingMessages()
+		) {
+			return;
+		}
+		pi.sendUserMessage(
+			"Continue the current task from the compacted context. Do not wait for another user message; proceed with the next required step.",
+			{ deliverAs: "followUp" },
 		);
 	});
 

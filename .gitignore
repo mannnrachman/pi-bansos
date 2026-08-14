@@ -4,3 +4,4 @@ dist/
 .npm
 # pi-bansos runtime state (relay toggle) — lives next to the extension
 .relay-state.json
+.pi/

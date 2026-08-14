@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.4.5] - 2026-08-14
+
+### Changed
+- Removed the retired MiMo upstream and ignored local Pi subagent artifacts.
+- Added OpenCode CLI fingerprint headers for more reliable free-model requests.
+- Kept relay state outside the package directory so npm updates preserve it.
+
 ## [0.4.4] - 2026-08-05
 
 ### Fixed
