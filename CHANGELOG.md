@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.4.6] - 2026-08-14
+
+### Added
+- 5 new KiloCode free models: `nvidia/nemotron-3.5-lightning:free`, `nvidia/nemotron-3.5-content-safety:free`, `tencent/hy3:free`, `liquid/lfm-2.5-2.6b:free`, `poolside/laguna-s-2.1:free` (specs verified against the live KiloCode API).
+
+### Removed
+- `poolside/laguna-m.1:free` — no longer exists in the KiloCode API.
+
 ## [0.4.5] - 2026-08-14
 
 ### Changed

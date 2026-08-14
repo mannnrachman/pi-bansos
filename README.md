@@ -2,7 +2,7 @@
 
 Free model provider for [**pi**](https://pi.dev) ([browse packages](https://pi.dev/packages)). It adds a `bansos` provider with live free models from **2 upstreams** — OpenCode Zen and KiloCode gateway — through a local OpenAI-compatible proxy.
 
-## Models (16 total)
+## Models (20 total)
 
 All models are **free, no API key required**. pi-bansos health-checks every model at startup and only registers the ones that are currently alive.
 
@@ -18,7 +18,7 @@ All models are **free, no API key required**. pi-bansos health-checks every mode
 | `ling-3.0-flash-free` | Ling 3.0 Flash | 262K tokens | 32K tokens | ✅ |
 | `laguna-s-2.1-free` | Laguna S 2.1 | 262K tokens | 32K tokens | ✅ |
 
-### KiloCode Gateway (9 models)
+### KiloCode Gateway (13 models)
 
 Keyless — no API key needed. 200 requests/hour per IP.
 
@@ -28,7 +28,11 @@ Keyless — no API key needed. 200 requests/hour per IP.
 | `stepfun/step-3.7-flash:free` | Step 3.7 Flash Free | 262K tokens | 262K tokens | ❌ |
 | `nvidia/nemotron-3-ultra-550b-a55b:free` | Nemotron 3 Ultra Free | 1M tokens | 65K tokens | ✅ |
 | `nvidia/nemotron-3-super-120b-a12b:free` | Nemotron 3 Super Free | 262K tokens | 262K tokens | ✅ ⚠️ |
-| `poolside/laguna-m.1:free` | Laguna M.1 Free | 262K tokens | 32K tokens | ❌ |
+| `nvidia/nemotron-3.5-lightning:free` | Nemotron 3.5 Lightning Free | 1M tokens | 65K tokens | ✅ |
+| `nvidia/nemotron-3.5-content-safety:free` | Nemotron 3.5 Content Safety Free | 128K tokens | 8K tokens | ✅ |
+| `tencent/hy3:free` | Tencent Hy3 Free | 262K tokens | 128K tokens | ✅ |
+| `liquid/lfm-2.5-2.6b:free` | Liquid LFM 2.5 2.6B Free | 128K tokens | 8K tokens | ❌ |
+| `poolside/laguna-s-2.1:free` | Laguna S 2.1 Free | 262K tokens | 32K tokens | ✅ |
 | `cohere/north-mini-code:free` | North Mini Code Free | 256K tokens | 64K tokens | ❌ |
 | `poolside/laguna-xs-2.1:free` | Laguna XS 2.1 Free | 262K tokens | 32K tokens | ❌ |
 | `nvidia/nemotron-3-nano-omni-30b-a3b-reasoning:free` | Nemotron 3 Nano Omni Free | 256K tokens | 65K tokens | ✅ |
@@ -40,7 +44,7 @@ Keyless — no API key needed. 200 requests/hour per IP.
 
 - **Zero cost** — all models free, no API key needed for supported upstreams
 - **Auto health-check** — only alive models registered at startup; dead ones skipped silently
-- **16 models from 2 sources** — OpenCode Zen + KiloCode gateway
+- **20 models from 2 sources** — OpenCode Zen + KiloCode gateway
 - **Local-only proxy** — binds to `127.0.0.1`, nothing exposed externally
 - **Optional relay egress** — route through a Vercel/Cloudflare relay to dodge per-IP rate limits, toggled live via `/bansos`
 - **Auto port bump** — if port 18080 is taken, automatically tries the next one (up to 18100)
