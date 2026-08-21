@@ -1,5 +1,15 @@
 # Changelog
 
+## Unreleased
+
+### Changed
+- Keep only directly verified OpenCode free models; remove DeepSeek V4 Flash, North Mini Code, and Ling 3.0 Flash.
+- Add Muse Spark 1.2 Contributor Free, Ox Alpha Free, Hy3 Free, Nemotron 3.5 Lightning Free, and KiloCode Dots3-Note Preview Free.
+- Route Muse through OpenAI Responses and suppress its unsupported `reasoning.effort: "none"` value.
+- Show OpenCode/KiloCode labels in the shared `bansos` provider.
+- Separate local OpenCode and KiloCode rate-limit buckets: UTC-day OpenCode guard and rolling-hour Kilo guard.
+- Document manual Muse verification in README.
+
 ## [0.4.6] - 2026-08-14
 
 ### Added

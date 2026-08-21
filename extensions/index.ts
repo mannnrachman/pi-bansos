@@ -105,7 +105,8 @@ let relayHits = 0;
 // Catalog served at GET /v1/models — ONLY the alive free models we register.
 // Set after health checks. Prevents paid/other upstream models from leaking
 // through the proxy's /v1/models (opencode returns 60 models incl. 54 paid).
-let aliveCatalog: ModelDef[] = [];
+type RegisteredModel = ModelDef & { source: Upstream };
+let aliveCatalog: RegisteredModel[] = [];
 
 // Relay-aware fetch. Direct when disabled; otherwise POST to relay URL with the
 // two relay headers. Falls back to direct on relay error (non-strict).
@@ -219,44 +220,82 @@ async function deployVercelRelay(
 }
 
 // ── Model Definitions ──────────────────────────────────────────────
+type ProviderApi = "openai-completions" | "openai-responses";
+type Upstream = "opencode" | "kilo";
+
 interface ModelDef {
 	id: string;
 	name: string;
 	reasoning: boolean;
 	contextWindow: number;
 	maxTokens: number;
+	api?: ProviderApi;
+	input?: ("text" | "image")[];
 	thinkingFormat?: "openrouter";
+	thinkingLevelMap?: Partial<
+		Record<
+			"off" | "minimal" | "low" | "medium" | "high" | "xhigh" | "max",
+			string | null
+		>
+	>;
 }
 
-// OpenCode models (existing) — factual specs from model docs / models.dev / gateway
+// OpenCode Zen free models verified against the live catalog and inference APIs.
 const KNOWN_MODELS: ModelDef[] = [
 	{
-		id: "deepseek-v4-flash-free",
-		name: "DeepSeek V4 Flash",
+		id: "x-preview-f-free",
+		name: "Ox Alpha Free",
 		reasoning: true,
 		contextWindow: 1_000_000,
-		maxTokens: 384_000,
+		maxTokens: 131_072,
+		input: ["text", "image"],
+	},
+	{
+		id: "muse-spark-1.2-contributor-free",
+		name: "Muse Spark 1.2 Free",
+		reasoning: true,
+		contextWindow: 1_048_576,
+		maxTokens: 131_072,
+		api: "openai-responses",
+		input: ["text", "image"],
+		thinkingLevelMap: {
+			off: null,
+			minimal: "minimal",
+			low: "low",
+			medium: "medium",
+			high: "high",
+			xhigh: "xhigh",
+			max: "max",
+		},
 	},
 	{
 		id: "mimo-v2.5-free",
-		name: "Mimo V2.5 Free",
-		reasoning: false,
-		contextWindow: 1_048_576,
-		maxTokens: 131_072,
+		name: "MiMo V2.5 Free",
+		reasoning: true,
+		contextWindow: 200_000,
+		maxTokens: 32_000,
+		input: ["text", "image"],
+	},
+	{
+		id: "hy3-free",
+		name: "Hy3 Free",
+		reasoning: true,
+		contextWindow: 190_000,
+		maxTokens: 64_000,
 	},
 	{
 		id: "nemotron-3-ultra-free",
-		name: "Nemotron 3 Ultra",
+		name: "Nemotron 3 Ultra Free",
 		reasoning: true,
 		contextWindow: 1_000_000,
-		maxTokens: 65_536,
+		maxTokens: 128_000,
 	},
 	{
-		id: "north-mini-code-free",
-		name: "North Mini Code",
+		id: "nemotron-3.5-lightning-free",
+		name: "Nemotron 3.5 Lightning Free",
 		reasoning: true,
-		contextWindow: 256_000,
-		maxTokens: 64_000,
+		contextWindow: 262_144,
+		maxTokens: 262_144,
 	},
 	{
 		id: "big-pickle",
@@ -266,22 +305,15 @@ const KNOWN_MODELS: ModelDef[] = [
 		maxTokens: 32_000,
 	},
 	{
-		id: "ling-3.0-flash-free",
-		name: "Ling 3.0 Flash",
-		reasoning: true,
-		contextWindow: 262_144,
-		maxTokens: 32_768,
-	},
-	{
 		id: "laguna-s-2.1-free",
-		name: "Laguna S 2.1",
+		name: "Laguna S 2.1 Free",
 		reasoning: true,
-		contextWindow: 262_144,
-		maxTokens: 32_768,
+		contextWindow: 256_000,
+		maxTokens: 32_000,
 	},
 ];
 
-// KiloCode gateway free models (keyless — https://kilo.ai/docs/gateway)
+// KiloCode gateway free models (keyless — https://kilo.ai/docs/gateway).
 const KILO_MODELS: ModelDef[] = [
 	{
 		id: "kilo-auto/free",
@@ -312,6 +344,15 @@ const KILO_MODELS: ModelDef[] = [
 		reasoning: true,
 		contextWindow: 262_144,
 		maxTokens: 262_144,
+		thinkingFormat: "openrouter",
+	},
+	{
+		id: "dots-studio/dots-3-note-preview:free",
+		name: "Dots3-Note Preview Free",
+		reasoning: true,
+		contextWindow: 512_000,
+		maxTokens: 512_000,
+		input: ["text", "image"],
 		thinkingFormat: "openrouter",
 	},
 	{
@@ -415,23 +456,43 @@ function log(level: LogLevel, message: string, meta?: Record<string, unknown>) {
 }
 
 // ── Rate Limiter ───────────────────────────────────────────────────
+// Kilo documents 200 free requests/hour/IP. OpenCode owns its own daily quota;
+// local limits only stop one Pi process from flooding either upstream.
 const rateLimitMap = new Map<string, { count: number; resetAt: number }>();
-const RATE_LIMIT_WINDOW_MS = 60_000;
-const RATE_LIMIT_MAX = 120;
+const RATE_LIMIT_MAX: Record<Upstream, number> = {
+	opencode: 200, // public free quota: requests per UTC day/IP
+	kilo: 200, // documented gateway quota: requests per one-hour window/IP
+};
+
+function rateLimitResetAt(upstream: Upstream, now: number): number {
+	if (upstream === "kilo") return now + 60 * 60_000;
+	const nextUtcDay = new Date(now);
+	nextUtcDay.setUTCHours(24, 0, 0, 0);
+	return nextUtcDay.getTime();
+}
+
+function rateLimitKey(upstream: Upstream, ip: string, now: number): string {
+	if (upstream === "kilo") return `${upstream}:${ip}`;
+	return `${upstream}:${new Date(now).toISOString().slice(0, 10)}:${ip}`;
+}
 
 // ponytail: Vercel relay rejects requests that ask for very large max_tokens
 // (response body / duration limits). Clamp at relay layer so direct mode stays
-// unconstrained and model config (KNOWN_MODELS) stays accurate.
+// unconstrained and model config stays accurate.
 const RELAY_MAX_TOKENS = 131_072;
 
-function checkRateLimit(ip: string): boolean {
+function checkRateLimit(ip: string, upstream: Upstream): boolean {
 	const now = Date.now();
-	const entry = rateLimitMap.get(ip);
+	const key = rateLimitKey(upstream, ip, now);
+	const entry = rateLimitMap.get(key);
 	if (!entry || entry.resetAt <= now) {
-		rateLimitMap.set(ip, { count: 1, resetAt: now + RATE_LIMIT_WINDOW_MS });
+		rateLimitMap.set(key, {
+			count: 1,
+			resetAt: rateLimitResetAt(upstream, now),
+		});
 		return true;
 	}
-	if (entry.count >= RATE_LIMIT_MAX) return false;
+	if (entry.count >= RATE_LIMIT_MAX[upstream]) return false;
 	entry.count++;
 	return true;
 }
@@ -583,13 +644,6 @@ function startProxy(
 	const server = http.createServer((req, res) => {
 		const clientIP = getClientIP(req);
 
-		if (!checkRateLimit(clientIP)) {
-			log("warn", "rate limit exceeded", { ip: clientIP });
-			res.writeHead(429, { "content-type": "application/json" });
-			res.end(JSON.stringify({ error: "rate limit exceeded" }));
-			return;
-		}
-
 		if (!ALLOWED_METHODS.has(req.method ?? "")) {
 			res.writeHead(405, { "content-type": "application/json" });
 			res.end(JSON.stringify({ error: "method not allowed" }));
@@ -618,7 +672,7 @@ function startProxy(
 					id: m.id,
 					object: "model",
 					created: 0,
-					owned_by: "bansos",
+					owned_by: m.source === "kilo" ? "kilocode" : "opencode",
 				})),
 			});
 			res.writeHead(200, {
@@ -653,6 +707,14 @@ function startProxy(
 					isKilo = true;
 				}
 			} catch {}
+
+			const upstream: Upstream = isKilo ? "kilo" : "opencode";
+			if (!checkRateLimit(clientIP, upstream)) {
+				log("warn", "rate limit exceeded", { ip: clientIP, upstream });
+				res.writeHead(429, { "content-type": "application/json" });
+				res.end(JSON.stringify({ error: `${upstream} rate limit exceeded` }));
+				return;
+			}
 
 			try {
 				if (isKilo && parsedBody) {
@@ -896,17 +958,21 @@ export default async function (pi: ExtensionAPI) {
 			compat: { supportsDeveloperRole: false },
 			models: aliveModels.map((m) => ({
 				id: m.id,
-				name: m.name,
+				name: `${m.source === "kilo" ? "KiloCode" : "OpenCode"} · ${m.name}`,
+				api: m.api,
 				reasoning: m.reasoning,
-				input: ["text"] as ("text" | "image")[],
+				thinkingLevelMap: m.thinkingLevelMap,
+				input: m.input ?? ["text"],
 				contextWindow: m.contextWindow,
 				maxTokens: m.maxTokens,
 				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
 				compat: m.thinkingFormat
 					? { supportsDeveloperRole: false, thinkingFormat: m.thinkingFormat }
-					: m.source === "kilo"
-						? { supportsDeveloperRole: false, supportsReasoningEffort: false }
-						: { supportsDeveloperRole: false, supportsReasoningEffort: true },
+					: m.api === "openai-responses"
+						? { sessionAffinityFormat: "openai-nosession" }
+						: m.source === "kilo"
+							? { supportsDeveloperRole: false, supportsReasoningEffort: false }
+							: { supportsDeveloperRole: false, supportsReasoningEffort: true },
 			})),
 		});
 	}

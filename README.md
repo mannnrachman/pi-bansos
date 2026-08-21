@@ -2,49 +2,58 @@
 
 Free model provider for [**pi**](https://pi.dev) ([browse packages](https://pi.dev/packages)). It adds a `bansos` provider with live free models from **2 upstreams** — OpenCode Zen and KiloCode gateway — through a local OpenAI-compatible proxy.
 
-## Models (20 total)
+## Models (22 total)
 
-All models are **free, no API key required**. pi-bansos health-checks every model at startup and only registers the ones that are currently alive.
+All models are free. The provider is one `bansos` entry, but model names show their upstream: **OpenCode** or **KiloCode**. Muse uses the OpenAI Responses API; the other models use Chat Completions. The startup check only verifies catalog membership; upstream access can still change between startup and a request.
 
-### OpenCode Zen (7 models)
+### OpenCode Zen (8 models)
 
-| Model ID | Name | Context | Max Output | Reasoning |
-|----------|------|---------|------------|-----------|
-| `deepseek-v4-flash-free` | DeepSeek V4 Flash | 1M tokens | 384K tokens | ✅ |
-| `mimo-v2.5-free` | Mimo V2.5 Free | 1M tokens | 131K tokens | ❌ |
-| `nemotron-3-ultra-free` | Nemotron 3 Ultra | 1M tokens | 65K tokens | ✅ |
-| `north-mini-code-free` | North Mini Code | 256K tokens | 64K tokens | ✅ |
-| `big-pickle` | Big Pickle | 200K tokens | 32K tokens | ✅ |
-| `ling-3.0-flash-free` | Ling 3.0 Flash | 262K tokens | 32K tokens | ✅ |
-| `laguna-s-2.1-free` | Laguna S 2.1 | 262K tokens | 32K tokens | ✅ |
+| Model ID | Name | API | Context | Max Output | Reasoning |
+|----------|------|-----|---------|------------|-----------|
+| `x-preview-f-free` | Ox Alpha Free | chat | 1M tokens | 131K tokens | ✅ |
+| `muse-spark-1.2-contributor-free` | Muse Spark 1.2 Free | responses | 1M tokens | 131K tokens | ✅ |
+| `mimo-v2.5-free` | MiMo V2.5 Free | chat | 200K tokens | 32K tokens | ✅ |
+| `hy3-free` | Hy3 Free | chat | 190K tokens | 64K tokens | ✅ |
+| `nemotron-3-ultra-free` | Nemotron 3 Ultra Free | chat | 1M tokens | 128K tokens | ✅ |
+| `nemotron-3.5-lightning-free` | Nemotron 3.5 Lightning Free | chat | 262K tokens | 262K tokens | ✅ |
+| `big-pickle` | Big Pickle | chat | 200K tokens | 32K tokens | ✅ |
+| `laguna-s-2.1-free` | Laguna S 2.1 Free | chat | 256K tokens | 32K tokens | ✅ |
 
-### KiloCode Gateway (13 models)
+**Muse note:** Muse uses OpenAI Responses (`/v1/responses`), while the other OpenCode models use Chat Completions (`/v1/chat/completions`). pi-bansos selects the API per model and suppresses Muse's unsupported `reasoning.effort: "none"` value when reasoning is off. It was verified end-to-end through both the proxy and pi-ai adapter with a response of `OK`.
 
-Keyless — no API key needed. 200 requests/hour per IP.
+Manual check: select `OpenCode · Muse Spark 1.2 Free` in `/model`, then ask it to `Reply with exactly OK.`
+
+Removed after direct inference checks:
+`deepseek-v4-flash-free` (free promotion ended), `north-mini-code-free`, and `ling-3.0-flash-free` (not supported).
+
+### KiloCode Gateway (14 models)
+
+Keyless — 200 requests/hour per IP.
 
 | Model ID | Name | Context | Max Output | Reasoning |
 |----------|------|---------|------------|-----------|
 | `kilo-auto/free` | Kilo Auto Free | 256K tokens | 10K tokens | ❌ |
 | `stepfun/step-3.7-flash:free` | Step 3.7 Flash Free | 262K tokens | 262K tokens | ❌ |
 | `nvidia/nemotron-3-ultra-550b-a55b:free` | Nemotron 3 Ultra Free | 1M tokens | 65K tokens | ✅ |
-| `nvidia/nemotron-3-super-120b-a12b:free` | Nemotron 3 Super Free | 262K tokens | 262K tokens | ✅ ⚠️ |
+| `nvidia/nemotron-3-super-120b-a12b:free` | Nemotron 3 Super Free | 262K tokens | 262K tokens | ✅ |
+| `dots-studio/dots-3-note-preview:free` | Dots3-Note Preview Free | 512K tokens | 512K tokens | ✅ |
+| `cohere/north-mini-code:free` | North Mini Code Free | 256K tokens | 64K tokens | ❌ |
+| `poolside/laguna-xs-2.1:free` | Laguna XS 2.1 Free | 262K tokens | 32K tokens | ❌ |
+| `nvidia/nemotron-3-nano-omni-30b-a3b-reasoning:free` | Nemotron 3 Nano Omni Free | 256K tokens | 65K tokens | ✅ |
+| `openrouter/free` | OpenRouter Free (auto) | 200K tokens | 65K tokens | ❌ |
 | `nvidia/nemotron-3.5-lightning:free` | Nemotron 3.5 Lightning Free | 1M tokens | 65K tokens | ✅ |
 | `nvidia/nemotron-3.5-content-safety:free` | Nemotron 3.5 Content Safety Free | 128K tokens | 8K tokens | ✅ |
 | `tencent/hy3:free` | Tencent Hy3 Free | 262K tokens | 128K tokens | ✅ |
 | `liquid/lfm-2.5-2.6b:free` | Liquid LFM 2.5 2.6B Free | 128K tokens | 8K tokens | ❌ |
 | `poolside/laguna-s-2.1:free` | Laguna S 2.1 Free | 262K tokens | 32K tokens | ✅ |
-| `cohere/north-mini-code:free` | North Mini Code Free | 256K tokens | 64K tokens | ❌ |
-| `poolside/laguna-xs-2.1:free` | Laguna XS 2.1 Free | 262K tokens | 32K tokens | ❌ |
-| `nvidia/nemotron-3-nano-omni-30b-a3b-reasoning:free` | Nemotron 3 Nano Omni Free | 256K tokens | 65K tokens | ✅ |
-| `openrouter/free` | OpenRouter Free (auto) | 200K tokens | 65K tokens | ❌ |
 
-> ⚠️ **Nemotron 3 Super Free** — known issue: emits output in `reasoning` field instead of `content`. May render blank in some clients until upstream fixes this.
+Rate limiting is separated internally by upstream: OpenCode uses its UTC-day local guard and its own upstream free quota; Kilo uses a rolling-hour local guard matching its documented 200/hour/IP limit.
 
 ## Why pi-bansos
 
 - **Zero cost** — all models free, no API key needed for supported upstreams
-- **Auto health-check** — only alive models registered at startup; dead ones skipped silently
-- **20 models from 2 sources** — OpenCode Zen + KiloCode gateway
+- **Auto health-check** — only catalog-listed models registered at startup; dead ones skipped silently
+- **22 models from 2 sources** — OpenCode Zen + KiloCode gateway
 - **Local-only proxy** — binds to `127.0.0.1`, nothing exposed externally
 - **Optional relay egress** — route through a Vercel/Cloudflare relay to dodge per-IP rate limits, toggled live via `/bansos`
 - **Auto port bump** — if port 18080 is taken, automatically tries the next one (up to 18100)
