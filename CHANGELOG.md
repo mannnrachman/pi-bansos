@@ -1,11 +1,13 @@
 # Changelog
 
+## Unreleased
+
 ## [0.4.7] - 2026-08-21
 
 ### Added
-- Add verified free models from OpenCode Zen and KiloCode Gateway for a 22-model catalog.
-- Add Muse Spark 1.2 Contributor Free with OpenAI Responses API support.
-- Add KiloCode Dots3-Note Preview Free.
+- Verified free models from OpenCode Zen and KiloCode Gateway for a 22-model catalog.
+- Muse Spark 1.2 Contributor Free with OpenAI Responses API support.
+- KiloCode Dots3-Note Preview Free.
 
 ### Changed
 - Show OpenCode/KiloCode labels in the shared `bansos` provider.
@@ -13,9 +15,7 @@
 - Document Muse's API difference and manual verification steps.
 
 ### Removed
-- Remove OpenCode DeepSeek V4 Flash, North Mini Code, and Ling 3.0 Flash after direct inference failures.
-
-## Unreleased
+- OpenCode DeepSeek V4 Flash, North Mini Code, and Ling 3.0 Flash after direct inference failures.
 
 ## [0.4.6] - 2026-08-14
 
