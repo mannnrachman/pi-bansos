@@ -241,15 +241,8 @@ interface ModelDef {
 }
 
 // OpenCode Zen free models verified against the live catalog and inference APIs.
+// Last verified: 2026-08-21 — x-preview-f-free removed (dropped from catalog).
 const KNOWN_MODELS: ModelDef[] = [
-	{
-		id: "x-preview-f-free",
-		name: "Ox Alpha Free",
-		reasoning: true,
-		contextWindow: 1_000_000,
-		maxTokens: 131_072,
-		input: ["text", "image"],
-	},
 	{
 		id: "muse-spark-1.2-contributor-free",
 		name: "Muse Spark 1.2 Free",
@@ -314,6 +307,7 @@ const KNOWN_MODELS: ModelDef[] = [
 ];
 
 // KiloCode gateway free models (keyless — https://kilo.ai/docs/gateway).
+// Specs match the live catalog fetched on 2026-08-21.
 const KILO_MODELS: ModelDef[] = [
 	{
 		id: "kilo-auto/free",
@@ -325,9 +319,11 @@ const KILO_MODELS: ModelDef[] = [
 	{
 		id: "stepfun/step-3.7-flash:free",
 		name: "Step 3.7 Flash Free",
-		reasoning: false,
+		reasoning: true,
 		contextWindow: 262_144,
 		maxTokens: 262_144,
+		input: ["text", "image"],
+		thinkingFormat: "openrouter",
 	},
 	{
 		id: "nvidia/nemotron-3-ultra-550b-a55b:free",
@@ -343,7 +339,7 @@ const KILO_MODELS: ModelDef[] = [
 		name: "Nemotron 3 Super Free",
 		reasoning: true,
 		contextWindow: 262_144,
-		maxTokens: 262_144,
+		maxTokens: 235_929,
 		thinkingFormat: "openrouter",
 	},
 	{
@@ -351,7 +347,7 @@ const KILO_MODELS: ModelDef[] = [
 		name: "Dots3-Note Preview Free",
 		reasoning: true,
 		contextWindow: 512_000,
-		maxTokens: 512_000,
+		maxTokens: 460_800,
 		input: ["text", "image"],
 		thinkingFormat: "openrouter",
 	},
@@ -365,9 +361,10 @@ const KILO_MODELS: ModelDef[] = [
 	{
 		id: "poolside/laguna-xs-2.1:free",
 		name: "Laguna XS 2.1 Free",
-		reasoning: false,
+		reasoning: true,
 		contextWindow: 262_144,
 		maxTokens: 32_768,
+		thinkingFormat: "openrouter",
 	},
 	{
 		id: "nvidia/nemotron-3-nano-omni-30b-a3b-reasoning:free",
@@ -375,6 +372,7 @@ const KILO_MODELS: ModelDef[] = [
 		reasoning: true,
 		contextWindow: 256_000,
 		maxTokens: 65_536,
+		input: ["text", "image"],
 		thinkingFormat: "openrouter",
 	},
 	{
@@ -383,6 +381,7 @@ const KILO_MODELS: ModelDef[] = [
 		reasoning: false,
 		contextWindow: 200_000,
 		maxTokens: 65_536,
+		input: ["text", "image"],
 	},
 	{
 		id: "nvidia/nemotron-3.5-lightning:free",
@@ -398,6 +397,7 @@ const KILO_MODELS: ModelDef[] = [
 		reasoning: true,
 		contextWindow: 128_000,
 		maxTokens: 8_192,
+		input: ["text", "image"],
 		thinkingFormat: "openrouter",
 	},
 	{
@@ -409,11 +409,20 @@ const KILO_MODELS: ModelDef[] = [
 		thinkingFormat: "openrouter",
 	},
 	{
+		id: "meituan/longcat-2.0-free",
+		name: "LongCat 2.0 Free",
+		reasoning: true,
+		contextWindow: 1_048_756,
+		maxTokens: 131_072,
+		thinkingFormat: "openrouter",
+	},
+	{
 		id: "liquid/lfm-2.5-2.6b:free",
 		name: "Liquid LFM 2.5 2.6B Free",
-		reasoning: false,
-		contextWindow: 128_000,
+		reasoning: true,
+		contextWindow: 65_536,
 		maxTokens: 8_192,
+		thinkingFormat: "openrouter",
 	},
 	{
 		id: "poolside/laguna-s-2.1:free",
@@ -421,6 +430,41 @@ const KILO_MODELS: ModelDef[] = [
 		reasoning: true,
 		contextWindow: 262_144,
 		maxTokens: 32_768,
+		thinkingFormat: "openrouter",
+	},
+	{
+		id: "minimax/minimax-m3:free",
+		name: "MiniMax M3 Free",
+		reasoning: true,
+		contextWindow: 1_048_576,
+		maxTokens: 943_718,
+		input: ["text", "image"],
+		thinkingFormat: "openrouter",
+	},
+	{
+		id: "thinkingmachines/inkling-small:free",
+		name: "Inkling Small Free",
+		reasoning: true,
+		contextWindow: 1_048_576,
+		maxTokens: 262_144,
+		input: ["text", "image"],
+		thinkingFormat: "openrouter",
+	},
+	{
+		id: "thinkingmachines/inkling:free",
+		name: "Inkling Free",
+		reasoning: true,
+		contextWindow: 1_048_576,
+		maxTokens: 262_144,
+		input: ["text", "image"],
+		thinkingFormat: "openrouter",
+	},
+	{
+		id: "minimax/minimax-m2.7:free",
+		name: "MiniMax M2.7 Free",
+		reasoning: true,
+		contextWindow: 196_608,
+		maxTokens: 176_947,
 		thinkingFormat: "openrouter",
 	},
 ];
@@ -897,21 +941,11 @@ function startProxy(
 }
 
 // ── Main extension ─────────────────────────────────────────────────
+// ponytail: factory may run during `omp install` / `pi --list-models` with no
+// session — never listen here (open socket keeps the CLI process alive).
 export default async function (pi: ExtensionAPI) {
 	log("info", "extension loading...");
-	let server: http.Server;
-	let actualPort: number;
-	try {
-		const r = await startProxy();
-		server = r.server;
-		actualPort = r.port;
-	} catch {
-		log(
-			"error",
-			"extension inactive — could not bind proxy port. resolve the port conflict and restart pi.",
-		);
-		return;
-	}
+	let server: http.Server | undefined;
 
 	// Health check opencode models
 	log("info", `checking ${KNOWN_MODELS.length} opencode model(s)...`);
@@ -938,21 +972,10 @@ export default async function (pi: ExtensionAPI) {
 	const aliveModels = [...opencodeChecks, ...kiloChecks].filter((m) => m.alive);
 	aliveCatalog = aliveModels;
 
-	if (aliveModels.length === 0) {
-		// Don't bail: still register /bansos below so the user can recover
-		// (e.g. switch the relay off) instead of being stranded with no command.
-		log(
-			"warn",
-			"no alive models found — provider inactive; /bansos still available to switch relay off / go direct",
-		);
-	} else {
-		log(
-			"info",
-			`${aliveModels.length} model(s) registered: ${aliveModels.map((m) => m.id).join(", ")}`,
-		);
-
+	const registerBansos = (port: number) => {
+		if (aliveModels.length === 0) return;
 		pi.registerProvider("bansos", {
-			baseUrl: `http://${HOST}:${actualPort}/v1`,
+			baseUrl: `http://${HOST}:${port}/v1`,
 			apiKey: "placeholder",
 			api: "openai-completions",
 			compat: { supportsDeveloperRole: false },
@@ -975,6 +998,21 @@ export default async function (pi: ExtensionAPI) {
 							: { supportsDeveloperRole: false, supportsReasoningEffort: true },
 			})),
 		});
+	};
+
+	if (aliveModels.length === 0) {
+		// Don't bail: still register /bansos below so the user can recover
+		// (e.g. switch the relay off) instead of being stranded with no command.
+		log(
+			"warn",
+			"no alive models found — provider inactive; /bansos still available to switch relay off / go direct",
+		);
+	} else {
+		log(
+			"info",
+			`${aliveModels.length} model(s) registered: ${aliveModels.map((m) => m.id).join(", ")}`,
+		);
+		registerBansos(PORT);
 	}
 
 	// ── /bansos command: toggle relay egress live (on|off|status|url [URL]) ───
@@ -1201,8 +1239,20 @@ export default async function (pi: ExtensionAPI) {
 		},
 	});
 
-	// Reload persisted state on session start/resume (env overrides still win).
+	// Bind proxy only when a session actually starts (not during install/list-models).
 	pi.on("session_start", async (_event, ctx) => {
+		if (!server) {
+			try {
+				const r = await startProxy();
+				server = r.server;
+				if (r.port !== PORT) registerBansos(r.port);
+			} catch {
+				log(
+					"error",
+					"proxy inactive — could not bind port. resolve the conflict and restart.",
+				);
+			}
+		}
 		relayState = resolveRelayState();
 		ctx.ui?.setStatus?.(
 			"bansos",
@@ -1232,8 +1282,10 @@ export default async function (pi: ExtensionAPI) {
 	});
 
 	pi.on("session_shutdown", () => {
+		if (!server) return;
 		log("info", "shutting down proxy...");
 		server.close();
+		server = undefined;
 		rateLimitMap.clear();
 		log("info", "shutdown complete");
 	});

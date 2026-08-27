@@ -2,6 +2,23 @@
 
 ## Unreleased
 
+## [0.4.8] - 2026-08-27
+
+### Fixed
+- **`omp install` hangs after "Installed"** — proxy HTTP server no longer starts in the extension factory (which runs during install / `--list-models`). Bind is deferred to `session_start`; `session_shutdown` still closes it. Catalog health-check + `registerProvider` stay in the factory.
+
+### Added
+- 5 new KiloCode free models: `minimax/minimax-m3:free`, `minimax/minimax-m2.7:free`, `thinkingmachines/inkling:free`, `thinkingmachines/inkling-small:free`, `meituan/longcat-2.0-free`. Catalog now 26 models (7 OpenCode + 19 KiloCode).
+
+### Changed
+- Updated KiloCode model specs to match live catalog (Dots3-Note max output 460K, Nemotron 3 Super max output 236K, LongCat 2.0 context 1M).
+- Added vision (image input) flags for `stepfun/step-3.7-flash:free`, `dots-studio/dots-3-note-preview:free`, `nvidia/nemotron-3-nano-omni-30b-a3b-reasoning:free`, `openrouter/free`, `nvidia/nemotron-3.5-content-safety:free`, `minimax/minimax-m3:free`, `thinkingmachines/inkling:free`, `thinkingmachines/inkling-small:free`.
+- Enabled reasoning for `stepfun/step-3.7-flash:free`, `poolside/laguna-xs-2.1:free`, `liquid/lfm-2.5-2.6b:free`.
+- Renamed `Step 3.7 Flash Free` → `Step 3.7 Flash Free`, `Liquid LFM 2.5 2.6B Free` label updated.
+
+### Removed
+- OpenCode `x-preview-f-free` (Ox Alpha Free) — dropped from live catalog.
+
 ## [0.4.7] - 2026-08-21
 
 ### Added
