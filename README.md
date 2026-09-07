@@ -6,30 +6,26 @@
 
 Free model provider for **[pi](https://pi.dev)** ([browse packages](https://pi.dev/packages)). It adds a `bansos` provider with live free models from **2 upstreams** — OpenCode Zen and KiloCode gateway — through a local OpenAI-compatible proxy.
 
-## Models (26 total)
+## Models (26 total: 7 OpenCode + 19 KiloCode)
 
 All models are free. The provider is one `bansos` entry, but model names show their upstream: **OpenCode** or **KiloCode**. Muse uses the OpenAI Responses API; the other models use Chat Completions. The startup check only verifies catalog membership; upstream access can still change between startup and a request.
 
 ### OpenCode Zen (7 models)
 
-
 | Model ID                          | Name                        | Vision | API       | Context     | Max Output  | Reasoning |
 | --------------------------------- | --------------------------- | ------ | --------- | ----------- | ----------- | --------- |
+| `muse-spark-1.3-contributor-free` | Muse Spark 1.3 Free         | ✅      | responses | 1M tokens   | 131K tokens | ✅         |
 | `muse-spark-1.2-contributor-free` | Muse Spark 1.2 Free         | ✅      | responses | 1M tokens   | 131K tokens | ✅         |
 | `mimo-v2.5-free`                  | MiMo V2.5 Free              | ✅      | chat      | 200K tokens | 32K tokens  | ✅         |
-| `hy3-free`                        | Hy3 Free                    | ❌      | chat      | 190K tokens | 64K tokens  | ✅         |
+| `ling-3.0-flash-fin-free`         | Ling 3.0 Flash Fin Free     | ❌      | chat      | 262K tokens | 32K tokens  | ✅         |
 | `nemotron-3-ultra-free`           | Nemotron 3 Ultra Free       | ❌      | chat      | 1M tokens   | 128K tokens | ✅         |
 | `nemotron-3.5-lightning-free`     | Nemotron 3.5 Lightning Free | ❌      | chat      | 262K tokens | 262K tokens | ✅         |
 | `big-pickle`                      | Big Pickle                  | ❌      | chat      | 200K tokens | 32K tokens  | ✅         |
-| `laguna-s-2.1-free`               | Laguna S 2.1 Free           | ❌      | chat      | 256K tokens | 32K tokens  | ✅         |
 
 
-**Muse note:** Muse uses OpenAI Responses (`/v1/responses`), while the other OpenCode models use Chat Completions (`/v1/chat/completions`). pi-bansos selects the API per model and suppresses Muse's unsupported `reasoning.effort: "none"` value when reasoning is off. It was verified end-to-end through both the proxy and pi-ai adapter with a response of `OK`.
+**Muse note:** Muse uses OpenAI Responses (`/v1/responses`), while the other OpenCode models use Chat Completions (`/v1/chat/completions`). pi-bansos selects the API per model and suppresses Muse's unsupported `reasoning.effort: "none"` value when reasoning is off.
 
-Manual check: select `OpenCode · Muse Spark 1.2 Free` in `/model`, then ask it to `Reply with exactly OK.`
-
-Removed after direct inference checks:
-`deepseek-v4-flash-free` (free promotion ended), `north-mini-code-free`, and `ling-3.0-flash-free` (not supported).
+Manual check: select `OpenCode · Muse Spark 1.3 Free` in `/model`, then ask it to `Reply with exactly OK.`
 
 ### KiloCode Gateway (19 models)
 
@@ -49,8 +45,8 @@ Keyless — 200 requests/hour per IP.
 | `openrouter/free`                                    | OpenRouter Free (auto)           | ✅      | 200K tokens | 65K tokens  | ❌         |
 | `nvidia/nemotron-3.5-lightning:free`                 | Nemotron 3.5 Lightning Free      | ❌      | 1M tokens   | 65K tokens  | ✅         |
 | `nvidia/nemotron-3.5-content-safety:free`            | Nemotron 3.5 Content Safety Free | ✅      | 128K tokens | 8K tokens   | ✅         |
-| `tencent/hy3:free`                                   | Tencent Hy3 Free                 | ❌      | 262K tokens | 128K tokens | ✅         |
-| `meituan/longcat-2.0-free`                           | LongCat 2.0 Free                 | ❌      | 1M tokens   | 131K tokens | ✅         |
+| `inclusionai/ling-3.0-flash-sante:free`              | Ling 3.0 Flash Sante Free        | ❌      | 262K tokens | 32K tokens  | ✅         |
+| `inclusionai/ling-3.0-flash-fin:free`                | Ling 3.0 Flash Fin Free          | ❌      | 262K tokens | 32K tokens  | ✅         |
 | `liquid/lfm-2.5-2.6b:free`                           | Liquid LFM 2.5 2.6B Free         | ❌      | 65K tokens  | 8K tokens   | ✅         |
 | `poolside/laguna-s-2.1:free`                         | Laguna S 2.1 Free                | ❌      | 262K tokens | 32K tokens  | ✅         |
 | `minimax/minimax-m3:free`                            | MiniMax M3 Free                  | ✅      | 1M tokens   | 943K tokens | ✅         |
@@ -65,7 +61,7 @@ Rate limiting is separated internally by upstream: OpenCode uses its UTC-day loc
 
 - **Zero cost** — all models free, no API key needed for supported upstreams
 - **Auto health-check** — only catalog-listed models registered at startup; dead ones skipped silently
-- **26 models from 2 sources** — OpenCode Zen + KiloCode gateway
+- **26 models from 2 sources** — 7 OpenCode Zen + 19 KiloCode gateway
 - **Local-only proxy** — binds to `127.0.0.1`, nothing exposed externally
 - **Optional relay egress** — route through a Vercel/Cloudflare relay to dodge per-IP rate limits, toggled live via `/bansos`
 - **Auto port bump** — if port 18080 is taken, automatically tries the next one (up to 18100)

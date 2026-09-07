@@ -241,8 +241,26 @@ interface ModelDef {
 }
 
 // OpenCode Zen free models verified against the live catalog and inference APIs.
-// Last verified: 2026-08-21 — x-preview-f-free removed (dropped from catalog).
+// Last verified: 2026-09-07 — hy3-free + laguna-s-2.1-free dropped (401 not supported).
 const KNOWN_MODELS: ModelDef[] = [
+	{
+		id: "muse-spark-1.3-contributor-free",
+		name: "Muse Spark 1.3 Free",
+		reasoning: true,
+		contextWindow: 1_048_576,
+		maxTokens: 131_072,
+		api: "openai-responses",
+		input: ["text", "image"],
+		thinkingLevelMap: {
+			off: null,
+			minimal: "minimal",
+			low: "low",
+			medium: "medium",
+			high: "high",
+			xhigh: "xhigh",
+			max: "max",
+		},
+	},
 	{
 		id: "muse-spark-1.2-contributor-free",
 		name: "Muse Spark 1.2 Free",
@@ -270,11 +288,11 @@ const KNOWN_MODELS: ModelDef[] = [
 		input: ["text", "image"],
 	},
 	{
-		id: "hy3-free",
-		name: "Hy3 Free",
+		id: "ling-3.0-flash-fin-free",
+		name: "Ling 3.0 Flash Fin Free",
 		reasoning: true,
-		contextWindow: 190_000,
-		maxTokens: 64_000,
+		contextWindow: 262_144,
+		maxTokens: 32_768,
 	},
 	{
 		id: "nemotron-3-ultra-free",
@@ -297,17 +315,10 @@ const KNOWN_MODELS: ModelDef[] = [
 		contextWindow: 200_000,
 		maxTokens: 32_000,
 	},
-	{
-		id: "laguna-s-2.1-free",
-		name: "Laguna S 2.1 Free",
-		reasoning: true,
-		contextWindow: 256_000,
-		maxTokens: 32_000,
-	},
 ];
 
 // KiloCode gateway free models (keyless — https://kilo.ai/docs/gateway).
-// Specs match the live catalog fetched on 2026-08-21.
+// Specs match the live catalog fetched on 2026-09-07.
 const KILO_MODELS: ModelDef[] = [
 	{
 		id: "kilo-auto/free",
@@ -401,19 +412,19 @@ const KILO_MODELS: ModelDef[] = [
 		thinkingFormat: "openrouter",
 	},
 	{
-		id: "tencent/hy3:free",
-		name: "Tencent Hy3 Free",
+		id: "inclusionai/ling-3.0-flash-sante:free",
+		name: "Ling 3.0 Flash Sante Free",
 		reasoning: true,
 		contextWindow: 262_144,
-		maxTokens: 128_000,
+		maxTokens: 32_768,
 		thinkingFormat: "openrouter",
 	},
 	{
-		id: "meituan/longcat-2.0-free",
-		name: "LongCat 2.0 Free",
+		id: "inclusionai/ling-3.0-flash-fin:free",
+		name: "Ling 3.0 Flash Fin Free",
 		reasoning: true,
-		contextWindow: 1_048_756,
-		maxTokens: 131_072,
+		contextWindow: 262_144,
+		maxTokens: 32_768,
 		thinkingFormat: "openrouter",
 	},
 	{

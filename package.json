@@ -1,6 +1,6 @@
 {
 	"name": "pi-bansos",
-	"version": "0.4.8",
+	"version": "0.4.9",
 	"description": "Free OpenAI-compatible model provider for pi via OpenCode Zen and KiloCode gateway",
 	"keywords": [
 		"pi-package",

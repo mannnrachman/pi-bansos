@@ -2,6 +2,16 @@
 
 ## Unreleased
 
+## [0.4.9] - 2026-09-07
+
+### Added
+- OpenCode `muse-spark-1.3-contributor-free` (Responses API) and `ling-3.0-flash-fin-free` (chat). Verified against live Zen catalog + inference ping.
+- KiloCode `inclusionai/ling-3.0-flash-sante:free` and `inclusionai/ling-3.0-flash-fin:free`.
+
+### Removed
+- OpenCode `hy3-free` and `laguna-s-2.1-free` — catalog OUT, inference 401 `Model is not supported`.
+- KiloCode `tencent/hy3:free` (404 unavailable) and `meituan/longcat-2.0-free` (paid only).
+
 ## [0.4.8] - 2026-08-27
 
 ### Fixed
