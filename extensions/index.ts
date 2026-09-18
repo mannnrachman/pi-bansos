@@ -3,7 +3,7 @@
  *
  * OpenCode models + KiloCode gateway free models
  */
-import { randomUUID } from "node:crypto";
+import { randomBytes } from "node:crypto";
 import fs from "node:fs";
 import http from "node:http";
 import https from "node:https";
@@ -20,19 +20,161 @@ const KILO_CHAT_URL = "https://api.kilo.ai/api/gateway/chat/completions";
 const PORT = Number(process.env.BANSOS_PORT) || 18080;
 const HOST = "127.0.0.1";
 const API = `${UPSTREAM_OPENCODE}/v1`;
-const OPENCODE_USER_AGENT = "opencode/latest/1.14.50/cli";
-const OPENCODE_CLIENT = "cli";
-const OPENCODE_PROJECT = "default";
-const OPENCODE_SESSION = randomUUID();
+
+// OpenCode Zen free-tier client fingerprint (verified live 2026-09-18; same
+// gates as 9router PR #4132). Missing any one → 403 FreeTierError.
+const OPENCODE_UA = "opencode/1.18.31";
+const OPENCODE_SESSION_RE = /^ses_[0-9a-f]{12}[0-9A-Za-z]{14}$/;
+const BASE62 =
+	"0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz";
+const OPENCODE_FINGERPRINT_TOOLS = ["bash", "glob", "grep", "read"] as const;
+const OPENCODE_RESPONSES_MODELS = new Set([
+	"muse-spark-1.2-contributor-free",
+	"muse-spark-1.3-contributor-free",
+]);
+
+let lastSessionTs = 0;
+let sessionCounter = 0;
+
+function unstableRandom(): string {
+	const bytes = randomBytes(14);
+	let out = "";
+	for (let i = 0; i < 14; i++) out += BASE62[bytes[i]! % 62];
+	return out;
+}
+
+function timeHexFrom(value: bigint): string {
+	return Array.from({ length: 6 }, (_, i) =>
+		Number((value >> BigInt(40 - 8 * i)) & 0xffn)
+			.toString(16)
+			.padStart(2, "0"),
+	).join("");
+}
+
+function generateSessionId(timestamp = Date.now()): string {
+	if (timestamp !== lastSessionTs) {
+		lastSessionTs = timestamp;
+		sessionCounter = 0;
+	}
+	sessionCounter++;
+	const current = BigInt(timestamp) * 0x1000n + BigInt(sessionCounter);
+	return `ses_${timeHexFrom(~current)}${unstableRandom()}`;
+}
+
+function generateRequestId(timestamp = Date.now()): string {
+	const current = BigInt(timestamp) * 0x1000n + 1n;
+	return `msg_${timeHexFrom(current)}${unstableRandom()}`;
+}
+
+// One stable session per process — shape must match OPENCODE_SESSION_RE.
+const OPENCODE_SESSION = generateSessionId();
+if (!OPENCODE_SESSION_RE.test(OPENCODE_SESSION)) {
+	throw new Error("opencode session id generation failed shape check");
+}
 
 function opencodeHeaders(): Record<string, string> {
 	return {
-		"User-Agent": OPENCODE_USER_AGENT,
-		"x-opencode-client": OPENCODE_CLIENT,
-		"x-opencode-project": OPENCODE_PROJECT,
+		"User-Agent": OPENCODE_UA,
+		Authorization: "Bearer public",
+		"x-opencode-client": "desktop",
+		"x-opencode-project": "global",
 		"x-opencode-session": OPENCODE_SESSION,
-		"x-opencode-request": randomUUID(),
+		"x-opencode-request": generateRequestId(),
+		Accept: "text/event-stream",
 	};
+}
+
+function toolNameOf(tool: unknown): string {
+	if (!tool || typeof tool !== "object" || Array.isArray(tool)) return "";
+	const t = tool as Record<string, unknown>;
+	const fn =
+		t.function && typeof t.function === "object" && !Array.isArray(t.function)
+			? (t.function as Record<string, unknown>)
+			: null;
+	const raw =
+		typeof t.name === "string"
+			? t.name
+			: typeof fn?.name === "string"
+				? fn.name
+				: "";
+	return raw.trim();
+}
+
+function ensureChatFingerprintTools(body: Record<string, unknown>): void {
+	const present = new Set<string>();
+	if (!Array.isArray(body.tools)) body.tools = [];
+	for (const tool of body.tools as unknown[]) {
+		const name = toolNameOf(tool);
+		if (name) present.add(name);
+	}
+	for (const name of OPENCODE_FINGERPRINT_TOOLS) {
+		if (present.has(name)) continue;
+		(body.tools as unknown[]).push({
+			type: "function",
+			function: {
+				name,
+				description: `OpenCode built-in ${name} tool`,
+				parameters: { type: "object", properties: {} },
+			},
+		});
+	}
+}
+
+function ensureResponsesFingerprintTools(body: Record<string, unknown>): void {
+	const present = new Set<string>();
+	if (!Array.isArray(body.tools)) body.tools = [];
+	for (const tool of body.tools as unknown[]) {
+		const name = toolNameOf(tool);
+		if (name) present.add(name);
+	}
+	for (const name of OPENCODE_FINGERPRINT_TOOLS) {
+		if (present.has(name)) continue;
+		(body.tools as unknown[]).push({
+			type: "function",
+			name,
+			description: `OpenCode built-in ${name} tool`,
+			parameters: { type: "object", properties: {} },
+		});
+	}
+}
+
+function sanitizeResponsesItems(body: Record<string, unknown>): void {
+	if (!Array.isArray(body.input)) return;
+	body.input = (body.input as unknown[]).filter((item) => {
+		if (!item || typeof item !== "object" || Array.isArray(item)) return true;
+		const it = item as Record<string, unknown>;
+		// Drop prior-turn reasoning: pooled Bearer public cannot decrypt
+		// encrypted_content across rotated Console accounts (400).
+		if (it.type === "reasoning") return false;
+		delete it.encrypted_content;
+		delete it.reasoning_encrypted_content;
+		return true;
+	});
+}
+
+/** Rewrite OpenCode free-tier request body to pass Zen client fingerprint gates. */
+function transformOpencodeBody(
+	body: Record<string, unknown>,
+): Record<string, unknown> {
+	// Gate: stream:false → 403 even with valid UA/session/tools.
+	body.stream = true;
+	const model = typeof body.model === "string" ? body.model : "";
+	if (OPENCODE_RESPONSES_MODELS.has(model) || model.includes("muse-spark")) {
+		if (body.max_output_tokens === undefined) {
+			if (typeof body.max_completion_tokens === "number")
+				body.max_output_tokens = body.max_completion_tokens;
+			else if (typeof body.max_tokens === "number")
+				body.max_output_tokens = body.max_tokens;
+		}
+		delete body.max_tokens;
+		delete body.max_completion_tokens;
+		body.store = false;
+		ensureResponsesFingerprintTools(body);
+		sanitizeResponsesItems(body);
+	} else {
+		ensureChatFingerprintTools(body);
+	}
+	return body;
 }
 
 // ── Relay egress (vercel/cloudflare worker, x-relay-target pattern) ──────────
@@ -241,7 +383,7 @@ interface ModelDef {
 }
 
 // OpenCode Zen free models verified against the live catalog and inference APIs.
-// Last verified: 2026-09-07 — hy3-free + laguna-s-2.1-free dropped (401 not supported).
+// Last verified: 2026-09-18 — free-tier client fingerprint gates (UA ≥1.17, ses_ shape, tool quartet, stream:true).
 const KNOWN_MODELS: ModelDef[] = [
 	{
 		id: "muse-spark-1.3-contributor-free",
@@ -506,8 +648,8 @@ function log(level: LogLevel, message: string, meta?: Record<string, unknown>) {
 	const ts = new Date().toISOString();
 	const metaStr = meta ? ` ${JSON.stringify(meta)}` : "";
 	const line = `[bansos] [${ts}] [${level.toUpperCase()}] ${message}${metaStr}`;
-	if (level === "error") console.error(line);
-	else console.log(line);
+	// Always stderr: omp RPC multiplexes JSON on stdout; console.log breaks the frame parser.
+	console.error(line);
 }
 
 // ── Rate Limiter ───────────────────────────────────────────────────
@@ -807,35 +949,42 @@ function startProxy(
 						res.end(data);
 					}
 				} else {
-					// OpenCode routing — relay (fetch-based) when enabled, else direct (existing, untouched)
+					// OpenCode routing — apply free-tier fingerprint before relay/direct.
+					let opencodeBody = bodyChunks.length
+						? Buffer.concat(bodyChunks)
+						: Buffer.alloc(0);
+					if (parsedBody) {
+						transformOpencodeBody(parsedBody);
+						if (relayState.enabled && relayState.url) {
+							const mt =
+								parsedBody.max_tokens ??
+								parsedBody.maxTokens ??
+								parsedBody.max_output_tokens;
+							if (typeof mt === "number" && mt > RELAY_MAX_TOKENS) {
+								if ("max_output_tokens" in parsedBody)
+									parsedBody.max_output_tokens = RELAY_MAX_TOKENS;
+								else parsedBody.max_tokens = RELAY_MAX_TOKENS;
+								log(
+									"info",
+									`clamped max_tokens ${mt} → ${RELAY_MAX_TOKENS} for relay`,
+								);
+							}
+						}
+						opencodeBody = Buffer.from(JSON.stringify(parsedBody));
+					}
+
 					if (relayState.enabled && relayState.url) {
 						const fullUrl = `${UPSTREAM_OPENCODE}${req.url ?? "/"}`;
 						const relayHeaders = sanitizeHeaders(
 							req.headers,
 							new URL(relayState.url).host,
 						);
+						relayHeaders["content-length"] = String(opencodeBody.length);
 						try {
-							// ponytail: clamp max_tokens for Vercel relay — large values
-							// cause 400 "Upstream request failed" (response size / duration
-							// limits). Direct mode stays unconstrained.
-							let relayBody = bodyChunks.length
-								? Buffer.concat(bodyChunks)
-								: undefined;
-							if (relayBody && parsedBody) {
-								const mt = parsedBody.max_tokens ?? parsedBody.maxTokens;
-								if (typeof mt === "number" && mt > RELAY_MAX_TOKENS) {
-									parsedBody.max_tokens = RELAY_MAX_TOKENS;
-									relayBody = Buffer.from(JSON.stringify(parsedBody));
-									log(
-										"info",
-										`clamped max_tokens ${mt} → ${RELAY_MAX_TOKENS} for relay`,
-									);
-								}
-							}
 							const response = await relayFetch(fullUrl, {
 								method: req.method || "POST",
 								headers: relayHeaders,
-								body: relayBody,
+								body: opencodeBody.length ? opencodeBody : undefined,
 								signal: AbortSignal.timeout(300_000),
 							});
 							const ct =
@@ -866,8 +1015,9 @@ function startProxy(
 							if (res.headersSent) return; // can't recover mid-stream
 						}
 					}
-					// direct path (existing, untouched)
+					// direct path
 					const fwd = sanitizeHeaders(req.headers, target.hostname);
+					fwd["content-length"] = String(opencodeBody.length);
 					const proxy = https.request(
 						{
 							method: req.method,
@@ -899,15 +1049,14 @@ function startProxy(
 							res.end();
 						}
 					});
-					proxy.setTimeout(30_000, () => {
+					// Streaming free models can exceed 30s; keep connection alive longer.
+					proxy.setTimeout(300_000, () => {
 						proxy.destroy(new Error("timeout"));
 					});
 					req.on("aborted", () => {
 						if (!proxy.destroyed) proxy.destroy();
 					});
-					// ponytail: body already buffered in bodyChunks above for model routing;
-					// req is drained so pipe() would send an empty body → upstream hang → 502.
-					proxy.end(Buffer.concat(bodyChunks));
+					proxy.end(opencodeBody);
 				}
 			} catch (err) {
 				log("error", "proxy error", { error: String(err) });

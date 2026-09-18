@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+## [0.4.10] - 2026-09-18
+
+### Fixed
+- **OpenCode free models 403 `FreeTierError`** — Zen now fingerprints the official client. Proxy sends `User-Agent: opencode/1.18.31`, canonical `ses_`/`msg_` ids, `Bearer public`, injects tool quartet `{bash, glob, grep, read}`, forces `stream: true`, and for Muse Responses sets `store: false` + strips prior reasoning items (same gates as 9router #4132).
+
 ## [0.4.9] - 2026-09-07
 
 ### Added
