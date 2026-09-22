@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+## [0.4.11] - 2026-09-22
+
+### Added
+- OpenCode `mimo-v2.6-flash-free` (chat, vision). Catalog IN; inference ping 200. Specs from models.dev (200K / 32K).
+- README **Update** section: pi `pi update npm:pi-bansos` / `--extensions`; OMP npm plugins via `omp install pi-bansos --force` (marketplace `plugin upgrade` does not apply).
+
 ## [0.4.10] - 2026-09-18
 
 ### Fixed

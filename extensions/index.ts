@@ -383,7 +383,7 @@ interface ModelDef {
 }
 
 // OpenCode Zen free models verified against the live catalog and inference APIs.
-// Last verified: 2026-09-18 — free-tier client fingerprint gates (UA ≥1.17, ses_ shape, tool quartet, stream:true).
+// Last verified: 2026-09-22 — added mimo-v2.6-flash-free (catalog IN, chat 200).
 const KNOWN_MODELS: ModelDef[] = [
 	{
 		id: "muse-spark-1.3-contributor-free",
@@ -424,6 +424,14 @@ const KNOWN_MODELS: ModelDef[] = [
 	{
 		id: "mimo-v2.5-free",
 		name: "MiMo V2.5 Free",
+		reasoning: true,
+		contextWindow: 200_000,
+		maxTokens: 32_000,
+		input: ["text", "image"],
+	},
+	{
+		id: "mimo-v2.6-flash-free",
+		name: "MiMo V2.6 Flash Free",
 		reasoning: true,
 		contextWindow: 200_000,
 		maxTokens: 32_000,

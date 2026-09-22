@@ -6,17 +6,18 @@
 
 Free model provider for **[pi](https://pi.dev)** ([browse packages](https://pi.dev/packages)). It adds a `bansos` provider with live free models from **2 upstreams** — OpenCode Zen and KiloCode gateway — through a local OpenAI-compatible proxy.
 
-## Models (26 total: 7 OpenCode + 19 KiloCode)
+## Models (27 total: 8 OpenCode + 19 KiloCode)
 
 All models are free. The provider is one `bansos` entry, but model names show their upstream: **OpenCode** or **KiloCode**. Muse uses the OpenAI Responses API; the other models use Chat Completions. The startup check only verifies catalog membership; upstream access can still change between startup and a request.
 
-### OpenCode Zen (7 models)
+### OpenCode Zen (8 models)
 
 | Model ID                          | Name                        | Vision | API       | Context     | Max Output  | Reasoning |
 | --------------------------------- | --------------------------- | ------ | --------- | ----------- | ----------- | --------- |
 | `muse-spark-1.3-contributor-free` | Muse Spark 1.3 Free         | ✅      | responses | 1M tokens   | 131K tokens | ✅         |
 | `muse-spark-1.2-contributor-free` | Muse Spark 1.2 Free         | ✅      | responses | 1M tokens   | 131K tokens | ✅         |
 | `mimo-v2.5-free`                  | MiMo V2.5 Free              | ✅      | chat      | 200K tokens | 32K tokens  | ✅         |
+| `mimo-v2.6-flash-free`            | MiMo V2.6 Flash Free        | ✅      | chat      | 200K tokens | 32K tokens  | ✅         |
 | `ling-3.0-flash-fin-free`         | Ling 3.0 Flash Fin Free     | ❌      | chat      | 262K tokens | 32K tokens  | ✅         |
 | `nemotron-3-ultra-free`           | Nemotron 3 Ultra Free       | ❌      | chat      | 1M tokens   | 128K tokens | ✅         |
 | `nemotron-3.5-lightning-free`     | Nemotron 3.5 Lightning Free | ❌      | chat      | 262K tokens | 262K tokens | ✅         |
@@ -61,7 +62,7 @@ Rate limiting is separated internally by upstream: OpenCode uses its UTC-day loc
 
 - **Zero cost** — all models free, no API key needed for supported upstreams
 - **Auto health-check** — only catalog-listed models registered at startup; dead ones skipped silently
-- **26 models from 2 sources** — 7 OpenCode Zen + 19 KiloCode gateway
+- **27 models from 2 sources** — 8 OpenCode Zen + 19 KiloCode gateway
 - **Local-only proxy** — binds to `127.0.0.1`, nothing exposed externally
 - **Optional relay egress** — route through a Vercel/Cloudflare relay to dodge per-IP rate limits, toggled live via `/bansos`
 - **Auto port bump** — if port 18080 is taken, automatically tries the next one (up to 18100)
@@ -90,6 +91,47 @@ omp install pi-bansos
 ```
 
 Restart OMP after install. Then `/model` → `bansos` → pick a free model.
+
+## Update
+
+There is no separate “update pi-bansos” product command. You refresh the npm package with the host tool (pi or OMP), then restart so the extension reloads.
+
+### pi
+
+Official package docs (`pi update`):
+
+```bash
+# update only this package
+pi update npm:pi-bansos
+# same idea:
+pi update --extension npm:pi-bansos
+
+# or update every installed extension
+pi update --extensions
+```
+
+Notes (from pi packages docs):
+
+- Unpinned installs (`pi install npm:pi-bansos`) get the latest npm version on update.
+- Pinned installs (`pi install npm:pi-bansos@0.4.10`) are **skipped** by `pi update --extensions` / `pi update --all` until you change the pin (install a newer `@x.y.z` or drop the pin).
+- After update, restart pi (quit and start again) so the new extension code loads.
+
+### OMP (Oh My Pi)
+
+`omp plugin upgrade` only upgrades **marketplace** plugins (`name@marketplace`). npm plugins like `pi-bansos` are not that format.
+
+Refresh npm plugins with install `--force`, or uninstall then install:
+
+```bash
+omp install pi-bansos --force
+# same as: omp plugin install pi-bansos --force
+
+# alternative
+omp plugin uninstall pi-bansos
+omp install pi-bansos
+```
+
+Restart OMP after. Check version: `omp plugin list` (should show `pi-bansos@…`).
 
 ## Usage
 
