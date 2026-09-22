@@ -146,6 +146,7 @@ Optional custom port:
 
 ```bash
 BANSOS_PORT=18081 pi   # or: BANSOS_PORT=18081 omp
+BANSOS_DEBUG=1 pi      # print relay and rate-limit warnings on stderr
 ```
 
 

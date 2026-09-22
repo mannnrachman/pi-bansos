@@ -18,6 +18,8 @@ const UPSTREAM_OPENCODE = "https://opencode.ai/zen";
 // KiloCode gateway — OpenAI-compatible; free models are keyless (200 req/hr per IP)
 const KILO_CHAT_URL = "https://api.kilo.ai/api/gateway/chat/completions";
 const PORT = Number(process.env.BANSOS_PORT) || 18080;
+// Startup health lines go to stderr and bury `pi -p` output. Quiet unless asked.
+const BANSOS_DEBUG = process.env.BANSOS_DEBUG === "1";
 const HOST = "127.0.0.1";
 const API = `${UPSTREAM_OPENCODE}/v1`;
 
@@ -653,6 +655,7 @@ const STRIP_HEADERS = new Set([
 // ── Logger ─────────────────────────────────────────────────────────
 type LogLevel = "info" | "warn" | "error" | "audit";
 function log(level: LogLevel, message: string, meta?: Record<string, unknown>) {
+	if (!BANSOS_DEBUG && level !== "error") return;
 	const ts = new Date().toISOString();
 	const metaStr = meta ? ` ${JSON.stringify(meta)}` : "";
 	const line = `[bansos] [${ts}] [${level.toUpperCase()}] ${message}${metaStr}`;
@@ -1087,7 +1090,7 @@ function startProxy(
 				if (settled) return;
 				if (err.code === "EADDRINUSE" && attempt < 20) {
 					attempt++;
-					log("warn", `port ${port} taken — trying ${port + 1}`);
+					log("info", `port ${port} taken — trying ${port + 1}`);
 					tryListen(port + 1);
 					return;
 				}
@@ -1100,7 +1103,6 @@ function startProxy(
 				settled = true;
 				const addr = server.address();
 				const realPort = addr && typeof addr === "object" ? addr.port : port;
-				log("info", `proxy listening on http://${HOST}:${realPort}`);
 				resolve({ server, port: realPort });
 			});
 		};
@@ -1112,27 +1114,18 @@ function startProxy(
 // ponytail: factory may run during `omp install` / `pi --list-models` with no
 // session — never listen here (open socket keeps the CLI process alive).
 export default async function (pi: ExtensionAPI) {
-	log("info", "extension loading...");
 	let server: http.Server | undefined;
 
-	// Health check opencode models
-	log("info", `checking ${KNOWN_MODELS.length} opencode model(s)...`);
 	const opencodeChecks = await Promise.all(
 		KNOWN_MODELS.map(async (model) => {
 			const alive = await checkModelAlive(model.id);
-			if (alive) log("info", `✓ ${model.id} is alive`);
-			else log("warn", `✗ ${model.id} is dead — skipping`);
 			return { ...model, alive, source: "opencode" as const };
 		}),
 	);
 
-	// Health check kilo models
-	log("info", `checking ${KILO_MODELS.length} kilo model(s)...`);
 	const kiloChecks = await Promise.all(
 		KILO_MODELS.map(async (model) => {
 			const alive = await checkKiloAlive(model.id);
-			if (alive) log("info", `✓ ${model.id} (kilo) is alive`);
-			else log("warn", `✗ ${model.id} (kilo) is dead — skipping`);
 			return { ...model, alive, source: "kilo" as const };
 		}),
 	);
@@ -1172,14 +1165,10 @@ export default async function (pi: ExtensionAPI) {
 		// Don't bail: still register /bansos below so the user can recover
 		// (e.g. switch the relay off) instead of being stranded with no command.
 		log(
-			"warn",
+			"error",
 			"no alive models found — provider inactive; /bansos still available to switch relay off / go direct",
 		);
 	} else {
-		log(
-			"info",
-			`${aliveModels.length} model(s) registered: ${aliveModels.map((m) => m.id).join(", ")}`,
-		);
 		registerBansos(PORT);
 	}
 
@@ -1426,10 +1415,6 @@ export default async function (pi: ExtensionAPI) {
 			"bansos",
 			`relay: ${relayState.enabled ? "ON" : "OFF"}`,
 		);
-		log(
-			"info",
-			`relay ${relayState.enabled ? "ON" : "OFF"} → ${relayState.url || "direct"}`,
-		);
 	});
 
 	// Pi normally pauses after threshold compaction. Queue a follow-up while the
@@ -1451,10 +1436,8 @@ export default async function (pi: ExtensionAPI) {
 
 	pi.on("session_shutdown", () => {
 		if (!server) return;
-		log("info", "shutting down proxy...");
 		server.close();
 		server = undefined;
 		rateLimitMap.clear();
-		log("info", "shutdown complete");
 	});
 }

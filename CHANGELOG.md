@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+## [0.4.12] - 2026-09-22
+
+### Fixed
+- Startup chatter no longer prints on stderr during `pi` or `pi -p` (health checks, registered-model list, listen, relay status, shutdown). Failures still print. Set `BANSOS_DEBUG=1` for relay and rate-limit warnings.
+
 ## [0.4.11] - 2026-09-22
 
 ### Added
