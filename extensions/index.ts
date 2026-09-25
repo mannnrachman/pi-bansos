@@ -1105,7 +1105,8 @@ function startProxy(
 		server.on("error", (err: NodeJS.ErrnoException) =>
 			log("error", "server error", { code: err.code, message: err.message }),
 		);
-		// Process-scoped: never keep a finished CLI (`pi -p`) alive.
+		// Lives until process exit; unref'd so it never keeps a finished CLI
+		// (`pi -p`, `omp install`) alive.
 		server.unref();
 		const addr = server.address();
 		resolve({
