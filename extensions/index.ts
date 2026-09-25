@@ -1142,8 +1142,11 @@ function sharedProxy(): Promise<ProxyHandle> {
 }
 
 // ── Main extension ─────────────────────────────────────────────────
-// ponytail: factory may run during `omp install` / `pi --list-models` with no
-// session — never listen here (bind cost + a port per non-session load).
+// The provider baseUrl must carry the proxy's real port before any session
+// resolves a bansos model: hosts bind the session's Model (baseUrl included)
+// when the session is created, and omp does not re-read a re-registered
+// baseUrl. So bind here, then register. Loads without a session (`omp install`
+// validation, `pi --list-models`) stay safe: the server is unref'd.
 export default async function (pi: ExtensionAPI) {
 	// Port this instance's provider baseUrl points at; the shared proxy owns
 	// the real one.
@@ -1202,9 +1205,12 @@ export default async function (pi: ExtensionAPI) {
 			"error",
 			"no alive models found — provider inactive; /bansos still available to switch relay off / go direct",
 		);
-	} else {
-		registerBansos(PORT);
 	}
+	// A failed bind is retried (and reported) by session_start.
+	await sharedProxy().then(
+		({ port }) => registerBansos(port),
+		() => undefined,
+	);
 
 	// ── /bansos command: toggle relay egress live (on|off|status|url [URL]) ───
 	pi.registerCommand("bansos", {
@@ -1430,7 +1436,7 @@ export default async function (pi: ExtensionAPI) {
 		},
 	});
 
-	// Bind proxy only when a session actually starts (not during install/list-models).
+	// Retry a bind that failed at load; normally the proxy is already up.
 	pi.on("session_start", async (_event, ctx) => {
 		try {
 			const { port } = await sharedProxy();
