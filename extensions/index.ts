@@ -204,7 +204,14 @@ function resolveRelayStatePath(): string {
 const RELAY_STATE_FILE = resolveRelayStatePath();
 
 type KnownRelay = { url: string; label?: string; addedAt?: string };
-type RelayState = { enabled: boolean; url: string; relays: KnownRelay[] };
+// TUI status-bar entry for the relay/proxy state; display preference only.
+type StatusBar = "shown" | "hidden";
+type RelayState = {
+	enabled: boolean;
+	url: string;
+	relays: KnownRelay[];
+	statusBar: StatusBar;
+};
 function loadRelayState(): RelayState {
 	try {
 		const s = JSON.parse(fs.readFileSync(RELAY_STATE_FILE, "utf8"));
@@ -213,16 +220,21 @@ function loadRelayState(): RelayState {
 			enabled: Boolean(s?.enabled),
 			url: typeof s?.url === "string" ? s.url.trim() : "",
 			relays,
+			statusBar: s?.statusBar === "hidden" ? "hidden" : "shown",
 		};
 	} catch {
-		return { enabled: false, url: "", relays: [] };
+		return { enabled: false, url: "", relays: [], statusBar: "shown" };
 	}
 }
-function saveRelayState(s: RelayState): void {
+type SaveResult = { ok: true } | { ok: false; error: string };
+function saveRelayState(s: RelayState): SaveResult {
 	try {
+		fs.mkdirSync(path.dirname(RELAY_STATE_FILE), { recursive: true });
 		fs.writeFileSync(RELAY_STATE_FILE, JSON.stringify(s));
+		return { ok: true };
 	} catch (e) {
 		log("warn", "could not persist relay state", { error: String(e) });
+		return { ok: false, error: String(e) };
 	}
 }
 // dedupe-add a relay to the known list
@@ -1096,7 +1108,10 @@ function startProxy(
 		}
 		server.off("listening", onListening);
 		server.off("error", onError);
-		log("error", "server error", { code: err.code, message: err.message });
+		// Startup failure: kept off stderr (it lands in the TUI); recorded in
+		// proxyState and shown by the status bar and `/bansos status`.
+		if (BANSOS_DEBUG)
+			log("error", "server error", { code: err.code, message: err.message });
 		reject(err);
 	};
 	const onListening = () => {
@@ -1129,17 +1144,67 @@ function startProxy(
 // handler reads this module's relayState/aliveCatalog. The server ends with
 // the process (unref'd above).
 type ProxyHandle = { server: http.Server; port: number };
-let proxy: Promise<ProxyHandle> | undefined;
+type ProxyState =
+	| { kind: "idle" }
+	| { kind: "starting"; ready: Promise<ProxyHandle> }
+	| { kind: "listening"; handle: ProxyHandle }
+	| { kind: "failed"; error: string };
+let proxyState: ProxyState = { kind: "idle" };
 
 function sharedProxy(): Promise<ProxyHandle> {
-	if (proxy) return proxy;
-	const starting = startProxy();
-	proxy = starting;
-	// Failed bind: forget it so the next session can retry.
-	starting.catch(() => {
-		if (proxy === starting) proxy = undefined;
-	});
-	return starting;
+	switch (proxyState.kind) {
+		case "listening":
+			return Promise.resolve(proxyState.handle);
+		case "starting":
+			return proxyState.ready;
+		case "idle":
+		case "failed": {
+			// A failed bind is retried by the next session.
+			const ready = startProxy();
+			proxyState = { kind: "starting", ready };
+			ready.then(
+				(handle) => {
+					proxyState = { kind: "listening", handle };
+				},
+				(err: unknown) => {
+					proxyState = {
+						kind: "failed",
+						error: err instanceof Error ? err.message : String(err),
+					};
+				},
+			);
+			return ready;
+		}
+	}
+}
+
+function describeProxy(state: ProxyState): string {
+	switch (state.kind) {
+		case "idle":
+			return "proxy: not started";
+		case "starting":
+			return "proxy: starting";
+		case "listening":
+			return `proxy: ${HOST}:${state.handle.port}`;
+		case "failed":
+			return `proxy: bind failed (${state.error})`;
+	}
+}
+
+// ── TUI status bar ─────────────────────────────────────────────────
+type StatusUi = {
+	setStatus?: (key: string, text: string | undefined) => void;
+};
+function statusText(transient?: string): string | undefined {
+	if (relayState.statusBar === "hidden") return undefined;
+	if (transient) return transient;
+	if (proxyState.kind === "failed") return "bansos: proxy down";
+	if (aliveCatalog.length === 0) return "bansos: no models";
+	return `relay: ${relayState.enabled ? "ON" : "OFF"}`;
+}
+// `undefined` removes the entry, so hidden also clears a previous render.
+function renderStatus(ui: StatusUi | undefined, transient?: string): void {
+	ui?.setStatus?.("bansos", statusText(transient));
 }
 
 // ── Main extension ─────────────────────────────────────────────────
@@ -1202,10 +1267,12 @@ export default async function (pi: ExtensionAPI) {
 	if (aliveModels.length === 0) {
 		// Don't bail: still register /bansos below so the user can recover
 		// (e.g. switch the relay off) instead of being stranded with no command.
-		log(
-			"error",
-			"no alive models found — provider inactive; /bansos still available to switch relay off / go direct",
-		);
+		// Kept off stderr at startup; the status bar and `/bansos status` show it.
+		if (BANSOS_DEBUG)
+			log(
+				"error",
+				"no alive models found — provider inactive; /bansos still available to switch relay off / go direct",
+			);
 	}
 	// A failed bind is retried (and reported) by session_start.
 	await sharedProxy().then(
@@ -1216,9 +1283,20 @@ export default async function (pi: ExtensionAPI) {
 	// ── /bansos command: toggle relay egress live (on|off|status|url [URL]) ───
 	pi.registerCommand("bansos", {
 		description:
-			"Relay egress: on | off | status | url [URL] | deploy | list | use <URL> | remove <URL>",
+			"Relay egress: on | off | status | url [URL] | deploy | list | use <URL> | remove <URL> | hide | show (status bar)",
 		getArgumentCompletions: (prefix: string) =>
-			["on", "off", "status", "url", "deploy", "list", "use", "remove"]
+			[
+				"on",
+				"off",
+				"status",
+				"url",
+				"deploy",
+				"list",
+				"use",
+				"remove",
+				"hide",
+				"show",
+			]
 				.filter((s) => s.startsWith(prefix))
 				.map((s) => ({ value: s, label: s })),
 		handler: async (args: string, ctx) => {
@@ -1227,18 +1305,28 @@ export default async function (pi: ExtensionAPI) {
 				.split(/\s+/);
 			const sub = parts[0] || "";
 			const rest = parts.slice(1).join(" ");
+			// The state file is the source of truth; another pi process may have
+			// changed it since this one loaded. Mutate a fresh copy.
+			relayState = resolveRelayState();
 
 			const flash = () =>
 				ctx.ui.notify(
 					`Relay ${relayState.enabled ? "ON" : "OFF"}${relayState.enabled ? ` → ${relayState.url}` : " (direct)"} | hits=${relayHits} | saved=${relayState.relays.length}`,
 					"info",
 				);
-			const persist = () => {
-				saveRelayState(relayState);
-				ctx.ui.setStatus(
-					"bansos",
-					`relay: ${relayState.enabled ? "ON" : "OFF"}`,
-				);
+			const persist = (): boolean => {
+				const saved = saveRelayState(relayState);
+				renderStatus(ctx.ui);
+				if (!saved.ok)
+					ctx.ui.notify(
+						`Could not save ${RELAY_STATE_FILE}: ${saved.error}`,
+						"error",
+					);
+				return saved.ok;
+			};
+			const setStatusBar = (statusBar: StatusBar) => {
+				relayState.statusBar = statusBar;
+				if (persist()) ctx.ui.notify(`bansos status bar ${statusBar}`, "info");
 			};
 			// mutate in place so the saved-relays list is preserved across switches
 			const setRelay = (enabled: boolean, url: string, addLabel?: string) => {
@@ -1260,7 +1348,7 @@ export default async function (pi: ExtensionAPI) {
 					(
 						await ctx.ui.input("Project name (empty = auto):", defaultName)
 					)?.trim() || defaultName;
-				ctx.ui.setStatus("bansos", "deploying relay…");
+				renderStatus(ctx.ui, "deploying relay…");
 				try {
 					const url = await deployVercelRelay(token, name, (m) =>
 						ctx.ui.notify(m, "info"),
@@ -1269,10 +1357,7 @@ export default async function (pi: ExtensionAPI) {
 					persist();
 					ctx.ui.notify(`✓ Deployed & active: ${url}`, "info");
 				} catch (e) {
-					ctx.ui.setStatus(
-						"bansos",
-						`relay: ${relayState.enabled ? "ON" : "OFF"}`,
-					);
+					renderStatus(ctx.ui);
 					ctx.ui.notify(`Deploy failed: ${(e as Error).message}`, "error");
 				}
 			};
@@ -1337,7 +1422,21 @@ export default async function (pi: ExtensionAPI) {
 				persist();
 				flash();
 			} else if (sub === "status") {
-				flash();
+				ctx.ui.notify(
+					[
+						`Relay ${relayState.enabled ? `ON → ${relayState.url}` : "OFF (direct)"} | hits=${relayHits} | saved=${relayState.relays.length}`,
+						describeProxy(proxyState),
+						`models found at startup: ${aliveCatalog.length}${aliveCatalog.length === 0 ? " (restart pi to re-check)" : ""}`,
+						`status bar: ${relayState.statusBar}`,
+					].join("\n"),
+					proxyState.kind === "failed" || aliveCatalog.length === 0
+						? "warning"
+						: "info",
+				);
+			} else if (sub === "hide") {
+				setStatusBar("hidden");
+			} else if (sub === "show") {
+				setStatusBar("shown");
 			} else if (sub === "list") {
 				showList();
 			} else if (sub === "use") {
@@ -1394,6 +1493,10 @@ export default async function (pi: ExtensionAPI) {
 			} else if (sub === "deploy") {
 				await doDeploy();
 			} else {
+				const statusBarItem =
+					relayState.statusBar === "shown"
+						? "Hide status bar"
+						: "Show status bar";
 				const choice = await ctx.ui.select("bansos relay", [
 					`Relay: ${relayState.enabled ? "ON" : "OFF"} → ${relayState.url || "direct"}`,
 					"Turn ON",
@@ -1403,6 +1506,7 @@ export default async function (pi: ExtensionAPI) {
 					"Set URL",
 					"Deploy Vercel relay…",
 					"List saved relays",
+					statusBarItem,
 				]);
 				if (choice === "Turn ON") {
 					setRelay(true, relayState.url || DEFAULT_RELAY_URL);
@@ -1432,6 +1536,10 @@ export default async function (pi: ExtensionAPI) {
 					await doDeploy();
 				} else if (choice === "List saved relays") {
 					showList();
+				} else if (choice === "Hide status bar") {
+					setStatusBar("hidden");
+				} else if (choice === "Show status bar") {
+					setStatusBar("shown");
 				}
 			}
 		},
@@ -1443,16 +1551,16 @@ export default async function (pi: ExtensionAPI) {
 			const { port } = await sharedProxy();
 			if (port !== providerPort) registerBansos(port);
 		} catch {
-			log(
-				"error",
-				"proxy inactive — could not bind port. resolve the conflict and restart.",
-			);
+			// Startup failure: kept off stderr; proxyState carries it to the
+			// status bar and `/bansos status`.
+			if (BANSOS_DEBUG)
+				log(
+					"error",
+					"proxy inactive — could not bind port. resolve the conflict and restart.",
+				);
 		}
 		relayState = resolveRelayState();
-		ctx.ui?.setStatus?.(
-			"bansos",
-			`relay: ${relayState.enabled ? "ON" : "OFF"}`,
-		);
+		renderStatus(ctx.ui);
 	});
 
 	// pi's /reload emits session_shutdown{reason:"reload"} and then re-imports
