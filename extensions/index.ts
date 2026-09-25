@@ -228,15 +228,16 @@ function loadRelayState(): RelayState {
 }
 type SaveResult = { ok: true } | { ok: false; error: string };
 function saveRelayState(s: RelayState): SaveResult {
+	// Other processes re-read this file on every change: write a temp file
+	// and rename so they never see a half-written one.
+	const tmp = `${RELAY_STATE_FILE}.${process.pid}.tmp`;
 	try {
 		fs.mkdirSync(path.dirname(RELAY_STATE_FILE), { recursive: true });
-		// Other processes re-read this file on every change: write a temp file
-		// and rename so they never see a half-written one.
-		const tmp = `${RELAY_STATE_FILE}.${process.pid}.tmp`;
 		fs.writeFileSync(tmp, JSON.stringify(s));
 		fs.renameSync(tmp, RELAY_STATE_FILE);
 		return { ok: true };
 	} catch (e) {
+		fs.rmSync(tmp, { force: true });
 		log("warn", "could not persist relay state", { error: String(e) });
 		return { ok: false, error: String(e) };
 	}
