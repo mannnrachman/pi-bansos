@@ -1105,8 +1105,8 @@ function startProxy(
 		server.on("error", (err: NodeJS.ErrnoException) =>
 			log("error", "server error", { code: err.code, message: err.message }),
 		);
-		// Lives until process exit; unref'd so it never keeps a finished CLI
-		// (`pi -p`, `omp install`) alive.
+		// Lives until process exit (or pi's /reload, see session_shutdown);
+		// unref'd so it never keeps a finished CLI (`pi -p`, `omp install`) alive.
 		server.unref();
 		const addr = server.address();
 		resolve({
@@ -1452,6 +1452,25 @@ export default async function (pi: ExtensionAPI) {
 		ctx.ui?.setStatus?.(
 			"bansos",
 			`relay: ${relayState.enabled ? "ON" : "OFF"}`,
+		);
+	});
+
+	// pi's /reload emits session_shutdown{reason:"reload"} and then re-imports
+	// this module (fresh module scope, new factory, new bind). Hand the port
+	// back first or every reload leaks one. Any other shutdown (omp subagent
+	// dispose — omp's event has no reason —, /new, /resume, quit) keeps the
+	// proxy other sessions still use. Not awaited: close() waits for the
+	// client's keep-alive sockets.
+	pi.on("session_shutdown", (event) => {
+		if (event.reason !== "reload") return;
+		const current = proxy;
+		proxy = undefined;
+		current?.then(
+			({ server }) => {
+				server.close();
+				server.closeIdleConnections?.();
+			},
+			() => undefined,
 		);
 	});
 

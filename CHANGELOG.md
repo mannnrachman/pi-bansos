@@ -4,7 +4,7 @@
 
 ### Fixed
 - **`MaxListenersExceededWarning: 11 listening listeners added to [Server]`** — the port bump registered a new `listening` callback per busy port; it now scans with one `listening`/`error` handler pair.
-- **One proxy port per session** — every session start (OMP runs task subagents in-process) bound its own proxy, and a subagent's shutdown closed it. Sessions bound to the same loaded extension now share one proxy; it is `unref`'d and lives until the process exits.
+- **One proxy port per session** — every session start (OMP runs task subagents in-process) bound its own proxy, and a subagent's shutdown closed it. Sessions bound to the same loaded extension now share one proxy; it is `unref`'d and lives until the process exits, except that pi's `/reload` (which re-imports the extension) closes it first so the reloaded copy can bind again instead of leaking a port.
 - **Requests sent to the wrong port when 18080 was taken** — the provider was first registered at `BANSOS_PORT` and re-registered at the bumped port on session start, but OMP keeps the session's already-resolved model URL, so chat requests kept going to the taken port (usually another process's proxy, or nothing). The proxy now binds at load and the provider is registered with the real port.
 
 ## [0.4.12] - 2026-09-22
