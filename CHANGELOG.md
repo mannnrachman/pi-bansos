@@ -8,7 +8,7 @@
 
 ### Changed
 - Startup failures (no models found, proxy bind failure) no longer print on stderr; the status bar shows `bansos: proxy down` / `bansos: no models` and `/bansos status` has the detail. `BANSOS_DEBUG=1` prints them again.
-- `/bansos` re-reads the state file before each change, so a second running pi/OMP process no longer overwrites settings with its stale copy. Saving creates `~/.pi/agent/` if missing and reports a failed save instead of ignoring it.
+- `/bansos` re-reads the state file before each change, so it no longer overwrites a change made earlier in another running pi/OMP process with its stale copy (simultaneous changes are still last-write-wins). Saving creates `~/.pi/agent/` if missing and reports a failed save instead of ignoring it.
 
 ### Fixed
 - **`MaxListenersExceededWarning: 11 listening listeners added to [Server]`** — the port bump registered a new `listening` callback per busy port; it now scans with one `listening`/`error` handler pair.
