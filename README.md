@@ -63,7 +63,7 @@ Rate limiting is separated internally by upstream: OpenCode uses its UTC-day loc
 - **Zero cost** — all models free, no API key needed for supported upstreams
 - **Auto health-check** — only catalog-listed models registered at startup; dead ones skipped silently
 - **27 models from 2 sources** — 8 OpenCode Zen + 19 KiloCode gateway
-- **Local-only proxy** — binds to `127.0.0.1`, nothing exposed externally
+- **Local-only proxy** — binds to `127.0.0.1`, nothing exposed externally; one proxy per pi/OMP process, shared by every session in it (including in-process subagents)
 - **Optional relay egress** — route through a Vercel/Cloudflare relay to dodge per-IP rate limits, toggled live via `/bansos`
 - **Auto port bump** — if port 18080 is taken, automatically tries the next one (up to 18100)
 

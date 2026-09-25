@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+### Fixed
+- **`MaxListenersExceededWarning: 11 listening listeners added to [Server]`** — the port bump registered a new `listening` callback per busy port; it now scans with one `listening`/`error` handler pair.
+- **One proxy port per session** — every session start (OMP runs task subagents in-process) bound its own proxy, and a subagent's shutdown closed it. Sessions now share one proxy per process; it is `unref`'d and lives until the process exits.
+
 ## [0.4.12] - 2026-09-22
 
 ### Fixed

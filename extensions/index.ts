@@ -846,7 +846,7 @@ function pipeUpstreamStream(
 // ── Start local proxy ──────────────────────────────────────────────
 function startProxy(
 	overridePort?: number,
-): Promise<{ server: http.Server; port: number }> {
+): Promise<ProxyHandle> {
 	const basePort = overridePort ?? PORT;
 
 	const server = http.createServer((req, res) => {
@@ -1078,43 +1078,76 @@ function startProxy(
 		});
 	});
 
-	return new Promise((resolve, reject) => {
-		// ponytail: auto-bump to next free port so multiple pi sessions on one
-		// machine don't fight over 18080. cap at 20 to avoid infinite scan.
-		// use server.address() for the real port: a failed listen()'s callback
-		// still fires on the next successful listen, so the closure `port` is stale.
-		let attempt = 0;
-		let settled = false;
-		const tryListen = (port: number) => {
-			server.once("error", (err: NodeJS.ErrnoException) => {
-				if (settled) return;
-				if (err.code === "EADDRINUSE" && attempt < 20) {
-					attempt++;
-					log("info", `port ${port} taken — trying ${port + 1}`);
-					tryListen(port + 1);
-					return;
-				}
-				settled = true;
-				log("error", "server error", { code: err.code, message: err.message });
-				reject(err);
-			});
-			server.listen(port, HOST, () => {
-				if (settled) return;
-				settled = true;
-				const addr = server.address();
-				const realPort = addr && typeof addr === "object" ? addr.port : port;
-				resolve({ server, port: realPort });
-			});
-		};
-		tryListen(basePort);
+	// ponytail: auto-bump to next free port so multiple pi processes on one
+	// machine don't fight over 18080. cap at 20 to avoid infinite scan.
+	// One listening/error handler pair covers the whole scan: listen(port, cb)
+	// per attempt stacks a `listening` listener for every busy port
+	// (MaxListenersExceededWarning once 11 ports are taken).
+	const { promise, resolve, reject } = Promise.withResolvers<ProxyHandle>();
+	let port = basePort;
+	let attempt = 0;
+	const onError = (err: NodeJS.ErrnoException) => {
+		if (err.code === "EADDRINUSE" && attempt < 20) {
+			attempt++;
+			log("info", `port ${port} taken — trying ${port + 1}`);
+			port++;
+			server.listen(port, HOST);
+			return;
+		}
+		server.off("listening", onListening);
+		server.off("error", onError);
+		log("error", "server error", { code: err.code, message: err.message });
+		reject(err);
+	};
+	const onListening = () => {
+		server.off("error", onError);
+		// Post-bind errors must not become an uncaught 'error' that kills pi.
+		server.on("error", (err: NodeJS.ErrnoException) =>
+			log("error", "server error", { code: err.code, message: err.message }),
+		);
+		// Process-scoped: never keep a finished CLI (`pi -p`) alive.
+		server.unref();
+		const addr = server.address();
+		resolve({
+			server,
+			port: addr && typeof addr === "object" ? addr.port : port,
+		});
+	};
+	server.on("error", onError);
+	server.once("listening", onListening);
+	server.listen(port, HOST);
+	return promise;
+}
+
+// ── Shared proxy ───────────────────────────────────────────────────
+// One loopback proxy per loaded module, shared by every session the factory
+// is bound to. Hosts such as omp run task subagents in-process and call the
+// factory + session_start for each of them, so a per-session server leaks a
+// port per subagent and a subagent's session_shutdown would close the proxy
+// its parent still uses. Module scope (not globalThis) because the request
+// handler reads this module's relayState/aliveCatalog. The server ends with
+// the process (unref'd above).
+type ProxyHandle = { server: http.Server; port: number };
+let proxy: Promise<ProxyHandle> | undefined;
+
+function sharedProxy(): Promise<ProxyHandle> {
+	if (proxy) return proxy;
+	const starting = startProxy();
+	proxy = starting;
+	// Failed bind: forget it so the next session can retry.
+	starting.catch(() => {
+		if (proxy === starting) proxy = undefined;
 	});
+	return starting;
 }
 
 // ── Main extension ─────────────────────────────────────────────────
 // ponytail: factory may run during `omp install` / `pi --list-models` with no
-// session — never listen here (open socket keeps the CLI process alive).
+// session — never listen here (bind cost + a port per non-session load).
 export default async function (pi: ExtensionAPI) {
-	let server: http.Server | undefined;
+	// Port this instance's provider baseUrl points at; the shared proxy owns
+	// the real one.
+	let providerPort: number | undefined;
 
 	const opencodeChecks = await Promise.all(
 		KNOWN_MODELS.map(async (model) => {
@@ -1134,6 +1167,7 @@ export default async function (pi: ExtensionAPI) {
 	aliveCatalog = aliveModels;
 
 	const registerBansos = (port: number) => {
+		providerPort = port;
 		if (aliveModels.length === 0) return;
 		pi.registerProvider("bansos", {
 			baseUrl: `http://${HOST}:${port}/v1`,
@@ -1398,17 +1432,14 @@ export default async function (pi: ExtensionAPI) {
 
 	// Bind proxy only when a session actually starts (not during install/list-models).
 	pi.on("session_start", async (_event, ctx) => {
-		if (!server) {
-			try {
-				const r = await startProxy();
-				server = r.server;
-				if (r.port !== PORT) registerBansos(r.port);
-			} catch {
-				log(
-					"error",
-					"proxy inactive — could not bind port. resolve the conflict and restart.",
-				);
-			}
+		try {
+			const { port } = await sharedProxy();
+			if (port !== providerPort) registerBansos(port);
+		} catch {
+			log(
+				"error",
+				"proxy inactive — could not bind port. resolve the conflict and restart.",
+			);
 		}
 		relayState = resolveRelayState();
 		ctx.ui?.setStatus?.(
@@ -1432,12 +1463,5 @@ export default async function (pi: ExtensionAPI) {
 			"Continue the current task from the compacted context. Do not wait for another user message; proceed with the next required step.",
 			{ deliverAs: "followUp" },
 		);
-	});
-
-	pi.on("session_shutdown", () => {
-		if (!server) return;
-		server.close();
-		server = undefined;
-		rateLimitMap.clear();
 	});
 }
