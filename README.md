@@ -162,17 +162,17 @@ By default pi-bansos talks to the free upstreams **directly**. If your IP gets r
 | ---------------------- | -------------------------------------------------------- |
 | `/bansos on`           | Route through the relay                                  |
 | `/bansos off`          | Go direct (default)                                      |
-| `/bansos status`       | Show relay state, request count, saved-relay count, proxy address or bind error, and models found at startup |
+| `/bansos status`       | Show relay state, request count, saved-relay count, proxy address or bind error, models found at startup, and the status-bar setting |
 | `/bansos url <URL>`    | Use a different relay (added to saved list)              |
 | `/bansos use <URL>`    | Switch to a relay and enable it (added to saved list)    |
 | `/bansos list`         | Show all saved relays (★ = active)                       |
 | `/bansos remove <URL>` | Forget a saved relay (the active one can't be removed)   |
 | `/bansos deploy`       | **Deploy a fresh Vercel relay** and switch to it         |
 | `/bansos hide` / `show` | Hide or show the `bansos` status-bar entry (default: shown) |
-| `/bansos`              | Interactive menu (incl. **Switch** / **Remove relay…** / **Hide status bar**) |
+| `/bansos`              | Interactive menu (incl. **Switch** / **Remove relay…** / **Hide status bar** or **Show status bar**) |
 
 
-The state is saved at `~/.pi/agent/pi-bansos-relay-state.json` (shared by pi and OMP, outside the package so updates keep it) and remembered across restarts — you manage it only via `/bansos`, nothing in your shell. It holds the relay on/off switch, the saved relays, and the status-bar preference. Each `/bansos` change re-reads the file before writing, so a change made earlier in another running pi/OMP process is kept; two processes changing it at the same moment still end with the last write. Already running processes pick up a changed status-bar preference at their next session start. Every relay you `deploy`, `use`, or `url` is **kept in a saved list**, so you can switch between them anytime without re-typing URLs. Any HTTP relay works (Vercel, Cloudflare, Deno, or your own). There is **no built-in default** — run `/bansos deploy` to create one or `/bansos url <URL>` to use your own.
+The state is saved at `~/.pi/agent/pi-bansos-relay-state.json` (shared by pi and OMP, outside the package so updates keep it) and remembered across restarts — you manage it only via `/bansos`, nothing in your shell. It holds the relay on/off switch, the saved relays, and the status-bar preference. Each `/bansos` change re-reads the file at the moment it saves, applies only that change, writes it atomically, and then switches this process to the saved state — so settings changed meanwhile by another running pi/OMP process are kept, and that process's relay switch also takes effect here. Commands that only show state (`status`, `list`) don't re-read; other running processes pick up changes at their next session start or their next `/bansos` change. If saving fails, the change is not applied and the error is shown. Every relay you `deploy`, `use`, or `url` is **kept in a saved list**, so you can switch between them anytime without re-typing URLs. Any HTTP relay works (Vercel, Cloudflare, Deno, or your own). There is **no built-in default** — run `/bansos deploy` to create one or `/bansos url <URL>` to use your own.
 
 **Switching between saved relays** (e.g. you deployed one and also have another):
 

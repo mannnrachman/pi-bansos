@@ -230,7 +230,11 @@ type SaveResult = { ok: true } | { ok: false; error: string };
 function saveRelayState(s: RelayState): SaveResult {
 	try {
 		fs.mkdirSync(path.dirname(RELAY_STATE_FILE), { recursive: true });
-		fs.writeFileSync(RELAY_STATE_FILE, JSON.stringify(s));
+		// Other processes re-read this file on every change: write a temp file
+		// and rename so they never see a half-written one.
+		const tmp = `${RELAY_STATE_FILE}.${process.pid}.tmp`;
+		fs.writeFileSync(tmp, JSON.stringify(s));
+		fs.renameSync(tmp, RELAY_STATE_FILE);
 		return { ok: true };
 	} catch (e) {
 		log("warn", "could not persist relay state", { error: String(e) });
@@ -1305,34 +1309,46 @@ export default async function (pi: ExtensionAPI) {
 				.split(/\s+/);
 			const sub = parts[0] || "";
 			const rest = parts.slice(1).join(" ");
-			// The state file is the source of truth; another pi process may have
-			// changed it since this one loaded. Mutate a fresh copy.
-			relayState = resolveRelayState();
-
 			const flash = () =>
 				ctx.ui.notify(
 					`Relay ${relayState.enabled ? "ON" : "OFF"}${relayState.enabled ? ` → ${relayState.url}` : " (direct)"} | hits=${relayHits} | saved=${relayState.relays.length}`,
 					"info",
 				);
-			const persist = (): boolean => {
-				const saved = saveRelayState(relayState);
-				renderStatus(ctx.ui);
-				if (!saved.ok)
+			// The state file is the source of truth and other pi processes write
+			// it too, so every change re-reads it, applies one mutation, writes it
+			// back, and only then adopts the result (which also drives routing).
+			// A failed save leaves this process unchanged.
+			const commit = (mutate: (s: RelayState) => void): boolean => {
+				const next = resolveRelayState();
+				mutate(next);
+				const saved = saveRelayState(next);
+				if (saved.ok) relayState = next;
+				else
 					ctx.ui.notify(
 						`Could not save ${RELAY_STATE_FILE}: ${saved.error}`,
 						"error",
 					);
+				renderStatus(ctx.ui);
 				return saved.ok;
 			};
 			const setStatusBar = (statusBar: StatusBar) => {
-				relayState.statusBar = statusBar;
-				if (persist()) ctx.ui.notify(`bansos status bar ${statusBar}`, "info");
+				if (
+					commit((s) => {
+						s.statusBar = statusBar;
+					})
+				)
+					ctx.ui.notify(`bansos status bar ${statusBar}`, "info");
 			};
 			// mutate in place so the saved-relays list is preserved across switches
-			const setRelay = (enabled: boolean, url: string, addLabel?: string) => {
-				relayState.enabled = enabled;
-				relayState.url = (url || "").trim() || DEFAULT_RELAY_URL;
-				if (relayState.url) ensureRelay(relayState, relayState.url, addLabel);
+			const setRelay = (
+				s: RelayState,
+				enabled: boolean,
+				url: string,
+				addLabel?: string,
+			) => {
+				s.enabled = enabled;
+				s.url = (url || "").trim() || DEFAULT_RELAY_URL;
+				if (s.url) ensureRelay(s, s.url, addLabel);
 			};
 			const doDeploy = async () => {
 				// Token prompted (not stored). pi's input has no secret mode — shows while typing.
@@ -1353,9 +1369,13 @@ export default async function (pi: ExtensionAPI) {
 					const url = await deployVercelRelay(token, name, (m) =>
 						ctx.ui.notify(m, "info"),
 					);
-					setRelay(true, url, `deployed ${name}`);
-					persist();
-					ctx.ui.notify(`✓ Deployed & active: ${url}`, "info");
+					if (commit((s) => setRelay(s, true, url, `deployed ${name}`)))
+						ctx.ui.notify(`✓ Deployed & active: ${url}`, "info");
+					else
+						ctx.ui.notify(
+							`Deployed ${url} but not saved — run /bansos use ${url} once the state file is writable`,
+							"warning",
+						);
 				} catch (e) {
 					renderStatus(ctx.ui);
 					ctx.ui.notify(`Deploy failed: ${(e as Error).message}`, "error");
@@ -1373,9 +1393,7 @@ export default async function (pi: ExtensionAPI) {
 				if (!choice) return;
 				const match = relayState.relays.find((r) => fmt(r) === choice);
 				if (!match) return;
-				setRelay(true, match.url);
-				persist();
-				flash();
+				if (commit((s) => setRelay(s, true, match.url))) flash();
 			};
 			const showList = () => {
 				if (!relayState.relays.length) {
@@ -1408,25 +1426,26 @@ export default async function (pi: ExtensionAPI) {
 				if (!choice) return;
 				const match = removable.find((r) => fmt(r) === choice);
 				if (!match) return;
-				removeRelay(relayState, match.url);
-				persist();
-				ctx.ui.notify(`Removed: ${match.url}`, "info");
+				if (commit((s) => removeRelay(s, match.url)))
+					ctx.ui.notify(`Removed: ${match.url}`, "info");
 			};
 
 			if (sub === "on") {
-				setRelay(true, relayState.url || DEFAULT_RELAY_URL);
-				persist();
-				flash();
+				if (commit((s) => setRelay(s, true, s.url || DEFAULT_RELAY_URL)))
+					flash();
 			} else if (sub === "off") {
-				relayState.enabled = false;
-				persist();
-				flash();
+				if (
+					commit((s) => {
+						s.enabled = false;
+					})
+				)
+					flash();
 			} else if (sub === "status") {
 				ctx.ui.notify(
 					[
 						`Relay ${relayState.enabled ? `ON → ${relayState.url}` : "OFF (direct)"} | hits=${relayHits} | saved=${relayState.relays.length}`,
 						describeProxy(proxyState),
-						`models found at startup: ${aliveCatalog.length}${aliveCatalog.length === 0 ? " (restart pi to re-check)" : ""}`,
+						`models found at startup: ${aliveCatalog.length}${aliveCatalog.length === 0 ? " (restart to re-check)" : ""}`,
 						`status bar: ${relayState.statusBar}`,
 					].join("\n"),
 					proxyState.kind === "failed" || aliveCatalog.length === 0
@@ -1449,9 +1468,7 @@ export default async function (pi: ExtensionAPI) {
 					ctx.ui.notify("No URL given", "warning");
 					return;
 				}
-				setRelay(true, url, "manual");
-				persist();
-				flash();
+				if (commit((s) => setRelay(s, true, url, "manual"))) flash();
 			} else if (sub === "remove") {
 				const url = (
 					rest ||
@@ -1473,9 +1490,8 @@ export default async function (pi: ExtensionAPI) {
 					ctx.ui.notify("Not in saved list", "warning");
 					return;
 				}
-				removeRelay(relayState, url);
-				persist();
-				ctx.ui.notify(`Removed: ${url}`, "info");
+				if (commit((s) => removeRelay(s, url)))
+					ctx.ui.notify(`Removed: ${url}`, "info");
 			} else if (sub === "url") {
 				const input =
 					rest ||
@@ -1483,13 +1499,17 @@ export default async function (pi: ExtensionAPI) {
 						"Relay URL (empty = default):",
 						relayState.url || DEFAULT_RELAY_URL,
 					));
-				setRelay(
-					relayState.enabled,
-					(input || "").trim() || DEFAULT_RELAY_URL,
-					"manual",
-				);
-				persist();
-				flash();
+				if (
+					commit((s) =>
+						setRelay(
+							s,
+							s.enabled,
+							(input || "").trim() || DEFAULT_RELAY_URL,
+							"manual",
+						),
+					)
+				)
+					flash();
 			} else if (sub === "deploy") {
 				await doDeploy();
 			} else {
@@ -1509,13 +1529,15 @@ export default async function (pi: ExtensionAPI) {
 					statusBarItem,
 				]);
 				if (choice === "Turn ON") {
-					setRelay(true, relayState.url || DEFAULT_RELAY_URL);
-					persist();
-					flash();
+					if (commit((s) => setRelay(s, true, s.url || DEFAULT_RELAY_URL)))
+						flash();
 				} else if (choice === "Turn OFF") {
-					relayState.enabled = false;
-					persist();
-					flash();
+					if (
+						commit((s) => {
+							s.enabled = false;
+						})
+					)
+						flash();
 				} else if (choice === "Switch relay…") {
 					await switchRelay();
 				} else if (choice === "Remove relay…") {
@@ -1525,13 +1547,17 @@ export default async function (pi: ExtensionAPI) {
 						"Relay URL (empty = default):",
 						relayState.url || DEFAULT_RELAY_URL,
 					);
-					setRelay(
-						relayState.enabled,
-						(input || "").trim() || DEFAULT_RELAY_URL,
-						"manual",
-					);
-					persist();
-					flash();
+					if (
+						commit((s) =>
+							setRelay(
+								s,
+								s.enabled,
+								(input || "").trim() || DEFAULT_RELAY_URL,
+								"manual",
+							),
+						)
+					)
+						flash();
 				} else if (choice === "Deploy Vercel relay…") {
 					await doDeploy();
 				} else if (choice === "List saved relays") {
