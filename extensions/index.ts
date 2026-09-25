@@ -1166,15 +1166,19 @@ function sharedProxy(): Promise<ProxyHandle> {
 			// A failed bind is retried by the next session.
 			const ready = startProxy();
 			proxyState = { kind: "starting", ready };
+			// Only settle the bind this state still points at: a pi /reload may
+			// have released it meanwhile.
 			ready.then(
 				(handle) => {
-					proxyState = { kind: "listening", handle };
+					if (proxyState.kind === "starting" && proxyState.ready === ready)
+						proxyState = { kind: "listening", handle };
 				},
 				(err: unknown) => {
-					proxyState = {
-						kind: "failed",
-						error: err instanceof Error ? err.message : String(err),
-					};
+					if (proxyState.kind === "starting" && proxyState.ready === ready)
+						proxyState = {
+							kind: "failed",
+							error: err instanceof Error ? err.message : String(err),
+						};
 				},
 			);
 			return ready;
@@ -1597,15 +1601,23 @@ export default async function (pi: ExtensionAPI) {
 	// client's keep-alive sockets.
 	pi.on("session_shutdown", (event) => {
 		if (event.reason !== "reload") return;
-		const current = proxy;
-		proxy = undefined;
-		current?.then(
-			({ server }) => {
-				server.close();
-				server.closeIdleConnections?.();
-			},
-			() => undefined,
-		);
+		const released = proxyState;
+		proxyState = { kind: "idle" };
+		const close = ({ server }: ProxyHandle) => {
+			server.close();
+			server.closeIdleConnections?.();
+		};
+		switch (released.kind) {
+			case "listening":
+				close(released.handle);
+				break;
+			case "starting":
+				released.ready.then(close, () => undefined);
+				break;
+			case "idle":
+			case "failed":
+				break;
+		}
 	});
 
 	// Pi normally pauses after threshold compaction. Queue a follow-up while the
