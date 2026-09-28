@@ -1,33 +1,44 @@
 # Changelog
 
-## Unreleased
+## [0.4.13] - 2026-09-28
 
-### Added
-- **Model catalog caching (issue #5)** — startup registers models from the last-known catalog (`bansos-models.json` in the host's agent dir, e.g. `~/.pi/agent/` or `~/.omp/agent/`) without waiting on upstream, then refreshes in the background; a failed refresh keeps the previous catalog. First run with no cache still fetches once. `/bansos refresh-models` forces a re-fetch and warns if it fails.
-- OpenCode `space-bunny-free` (reasoning, 1M context, 524K max output, text+image). Catalog IN; inference 200.
-- Kilo `qwen/qwen3.8-27b:free`.
+Everything from the Sept-28 working session: issues #5/#6/#7 (PRs #8/#9), the KiloCode 401 fix, catalog sync, per-host state files, and this README/CHANGELOG cleanup.
 
-### Changed
-- Relay state (and the new catalog cache) now resolve per host: pi → `~/.pi/agent/`, OMP → `~/.omp/agent/`, detected from the extension's real install path with an argv/title basename fallback for symlinked installs. Previously hardcoded to `~/.pi/agent/`.
+### Added — issue #5: instant startup via model-catalog caching
 
-### Removed
-- Kilo `minimax/minimax-m3:free`, `minimax/minimax-m2.7:free`, `thinkingmachines/inkling:free` (gone from the live catalog). `openrouter/free` stays pinned: absent from `/models` but chat still serves it.
+- **Model catalog caching (#5)** — startup registers models from the last-known catalog (`bansos-models.json` in the host's agent dir) **without waiting on upstream**, then refreshes in the background; a failed refresh keeps the previous catalog (a flaky connection no longer degrades startup). First run with no cache still fetches once from both upstreams.
+- **`/bansos refresh-models`** — forces a catalog re-fetch; warns when it fails so you know the list may be stale.
+- OpenCode `space-bunny-free` (stealth free model: reasoning, 1M context, 524K max output, text+image). Catalog IN; inference 200.
+- Kilo `qwen/qwen3.8-27b:free` (reasoning, 262K context, text+image).
 
-### Fixed
-- **Kilo 401 `INVALID_TOKEN`** — requests no longer send the stale `Authorization: Bearer kilo-free` header; the free gateway is keyless and rejects it. Catalog fetch and chat proxying both affected.
+### Added — issue #7 via PR #9: status bar & silent startup
 
-### Added
-- **`/bansos hide` / `/bansos show`** (and a menu item) toggle the `bansos` TUI status-bar entry. Saved as `statusBar` in `~/.pi/agent/pi-bansos-relay-state.json`; default shown.
+- **`/bansos hide` / `/bansos show`** (and a menu item) toggle the `bansos` TUI status-bar entry. Saved as `statusBar` in the relay state file; default shown.
 - `/bansos status` also reports the proxy address or bind error and the number of models found at startup.
-
-### Changed
 - Startup failures (no models found, proxy bind failure) no longer print on stderr; the status bar shows `bansos: proxy down` / `bansos: no models` and `/bansos status` has the detail. `BANSOS_DEBUG=1` prints them again.
-- Each `/bansos` change re-reads the state file when it saves, applies only that change, and writes atomically (temp file + rename), so it no longer overwrites settings another running pi/OMP process changed in the meantime with its stale copy. Saving creates `~/.pi/agent/` if missing; a failed save is reported and the change is not applied.
+- Each `/bansos` change re-reads the state file when it saves, applies only that change, and writes atomically (temp file + rename), so it no longer overwrites settings another running pi/OMP process changed in the meantime with its stale copy. Saving creates the agent dir if missing; a failed save is reported and the change is not applied.
 
-### Fixed
+### Fixed — issue #6 via PR #8: proxy port & listener hygiene
+
 - **`MaxListenersExceededWarning: 11 listening listeners added to [Server]`** — the port bump registered a new `listening` callback per busy port; it now scans with one `listening`/`error` handler pair.
 - **One proxy port per session** — every session start (OMP runs task subagents in-process) bound its own proxy, and a subagent's shutdown closed it. Sessions bound to the same loaded extension now share one proxy; it is `unref`'d and lives until the process exits, except that pi's `/reload` (which re-imports the extension) closes it first so the reloaded copy can bind again instead of leaking a port.
 - **Requests sent to the wrong port when 18080 was taken** — the provider was first registered at `BANSOS_PORT` and re-registered at the bumped port on session start, but OMP keeps the session's already-resolved model URL, so chat requests kept going to the taken port (usually another process's proxy, or nothing). The proxy now binds at load and the provider is registered with the real port.
+
+### Fixed — KiloCode 401 `INVALID_TOKEN`
+
+- Requests no longer send the stale `Authorization: Bearer kilo-free` header; the free gateway is keyless and now rejects placeholder tokens with 401. Both the catalog fetch and chat proxying were affected — every Kilo model failed health-check and chat until this was dropped. Verified live after the fix: catalog 200, `north-mini-code:free` chat 200 via pi.
+
+### Changed — per-host state files (pi vs OMP)
+
+- Relay state **and** the new catalog cache now resolve per host: pi → `~/.pi/agent/`, OMP → `~/.omp/agent/`, detected from the extension's real install path with a process-name basename fallback for symlinked installs (OMP npm plugins are often symlinks into a repo checkout, so realpath alone misroutes to pi). Previously both were hardcoded to `~/.pi/agent/` — OMP users couldn't find their relay state. Each host now keeps its own files; deleting one leaves the other untouched.
+
+### Removed — dead Kilo models
+
+- Kilo `minimax/minimax-m3:free`, `minimax/minimax-m2.7:free`, `thinkingmachines/inkling:free` — gone from the live catalog. `openrouter/free` stays but is now **pinned**: absent from `/models` since 2026-09-28, yet chat completions still serve it (200), so catalog filtering alone would drop a working model.
+
+### Docs
+
+- README restructured with a clear header hierarchy (Contents, Features, Models, Install, Update, Usage → Commands/Environment variables, Relay → deploy, Data files, Notes, Uninstall, License). Model tables now state the real facts: **26 total (9 OpenCode + 17 Kilo)**, `space-bunny-free` and `qwen/qwen3.8-27b:free` in, three dead Kilo models out, `openrouter/free` pinning explained, and a new **Data files** section documents per-host state paths.
 
 ## [0.4.12] - 2026-09-22
 

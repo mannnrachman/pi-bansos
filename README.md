@@ -2,15 +2,38 @@
 
 [![npm version](https://img.shields.io/npm/v/pi-bansos.svg?style=flat-square&logo=npm&logoColor=white)](https://www.npmjs.com/package/pi-bansos)
 [![npm downloads](https://img.shields.io/npm/d18m/pi-bansos.svg?style=flat-square&logo=npm&logoColor=white&label=downloads)](https://www.npmjs.com/package/pi-bansos)
-[![npm downloads/month](https://img.shields.io/npm/dm/pi-bansos.svg?style=flat-square&logo=npm&logoColor=white)](https://www.npmjs.com/package/pi-bansos)
+[![npm downloads/month](https://img.shields.io/npm/dm/pi-bansos.svg?style=flat-square&logo=npm&logoColor=white&label=downloads)](https://www.npmjs.com/package/pi-bansos)
 
 Free model provider for **[pi](https://pi.dev)** ([browse packages](https://pi.dev/packages)). It adds a `bansos` provider with live free models from **2 upstreams** — OpenCode Zen and KiloCode gateway — through a local OpenAI-compatible proxy.
 
-## Models (27 total: 8 OpenCode + 19 KiloCode)
+## Contents
 
-All models are free. The provider is one `bansos` entry, but model names show their upstream: **OpenCode** or **KiloCode**. Muse uses the OpenAI Responses API; the other models use Chat Completions. The startup check only verifies catalog membership; upstream access can still change between startup and a request.
+- [Features](#features)
+- [Models](#models)
+- [Install](#install)
+- [Update](#update)
+- [Usage](#usage)
+- [Relay (optional)](#relay-optional)
+- [Data files](#data-files)
+- [Notes](#notes)
+- [Uninstall](#uninstall)
+- [License](#license)
 
-### OpenCode Zen (8 models)
+## Features
+
+- **Zero cost** — all models free, no API key needed for supported upstreams
+- **26 models from 2 sources** — 9 OpenCode Zen + 17 KiloCode gateway
+- **Instant startup** — the model catalog is cached locally and registered without waiting on upstream; it refreshes in the background
+- **Auto health-check** — only catalog-listed models registered; dead ones skipped silently
+- **Local-only proxy** — binds to `127.0.0.1`, nothing exposed externally; one proxy per loaded extension, shared by every session that uses it (including OMP's in-process subagents)
+- **Optional relay egress** — route through a Vercel/Cloudflare relay to dodge per-IP rate limits, toggled live via `/bansos`
+- **Auto port bump** — if port 18080 is taken, automatically tries the next one (up to 18100)
+
+## Models
+
+**26 total: 9 OpenCode + 17 KiloCode.** All models are free. The provider is one `bansos` entry, but model names show their upstream: **OpenCode** or **KiloCode**. The startup check only verifies catalog membership; upstream access can still change between startup and a request.
+
+### OpenCode Zen (9 models)
 
 | Model ID                          | Name                        | Vision | API       | Context     | Max Output  | Reasoning |
 | --------------------------------- | --------------------------- | ------ | --------- | ----------- | ----------- | --------- |
@@ -18,20 +41,19 @@ All models are free. The provider is one `bansos` entry, but model names show th
 | `muse-spark-1.2-contributor-free` | Muse Spark 1.2 Free         | ✅      | responses | 1M tokens   | 131K tokens | ✅         |
 | `mimo-v2.5-free`                  | MiMo V2.5 Free              | ✅      | chat      | 200K tokens | 32K tokens  | ✅         |
 | `mimo-v2.6-flash-free`            | MiMo V2.6 Flash Free        | ✅      | chat      | 200K tokens | 32K tokens  | ✅         |
+| `space-bunny-free`                | Space Bunny                 | ✅      | chat      | 1M tokens   | 524K tokens | ✅         |
 | `ling-3.0-flash-fin-free`         | Ling 3.0 Flash Fin Free     | ❌      | chat      | 262K tokens | 32K tokens  | ✅         |
 | `nemotron-3-ultra-free`           | Nemotron 3 Ultra Free       | ❌      | chat      | 1M tokens   | 128K tokens | ✅         |
 | `nemotron-3.5-lightning-free`     | Nemotron 3.5 Lightning Free | ❌      | chat      | 262K tokens | 262K tokens | ✅         |
 | `big-pickle`                      | Big Pickle                  | ❌      | chat      | 200K tokens | 32K tokens  | ✅         |
 
-
 **Muse note:** Muse uses OpenAI Responses (`/v1/responses`), while the other OpenCode models use Chat Completions (`/v1/chat/completions`). pi-bansos selects the API per model and suppresses Muse's unsupported `reasoning.effort: "none"` value when reasoning is off.
 
 Manual check: select `OpenCode · Muse Spark 1.3 Free` in `/model`, then ask it to `Reply with exactly OK.`
 
-### KiloCode Gateway (19 models)
+### KiloCode Gateway (17 models)
 
-Keyless — 200 requests/hour per IP.
-
+Keyless — 200 requests/hour per IP. No `Authorization` header is sent; the free gateway rejects placeholder tokens.
 
 | Model ID                                             | Name                             | Vision | Context     | Max Output  | Reasoning |
 | ---------------------------------------------------- | -------------------------------- | ------ | ----------- | ----------- | --------- |
@@ -50,28 +72,14 @@ Keyless — 200 requests/hour per IP.
 | `inclusionai/ling-3.0-flash-fin:free`                | Ling 3.0 Flash Fin Free          | ❌      | 262K tokens | 32K tokens  | ✅         |
 | `liquid/lfm-2.5-2.6b:free`                           | Liquid LFM 2.5 2.6B Free         | ❌      | 65K tokens  | 8K tokens   | ✅         |
 | `poolside/laguna-s-2.1:free`                         | Laguna S 2.1 Free                | ❌      | 262K tokens | 32K tokens  | ✅         |
-| `minimax/minimax-m3:free`                            | MiniMax M3 Free                  | ✅      | 1M tokens   | 943K tokens | ✅         |
 | `thinkingmachines/inkling-small:free`                | Inkling Small Free               | ✅      | 1M tokens   | 262K tokens | ✅         |
-| `thinkingmachines/inkling:free`                      | Inkling Free                     | ✅      | 1M tokens   | 262K tokens | ✅         |
-| `minimax/minimax-m2.7:free`                          | MiniMax M2.7 Free                | ❌      | 196K tokens | 177K tokens | ✅         |
+| `qwen/qwen3.8-27b:free`                              | Qwen3.8 27B Free                 | ✅      | 262K tokens | 236K tokens | ✅         |
 
+`openrouter/free` is **pinned**: it no longer appears in the `/models` catalog, but chat completions still serve it — so it stays registered.
 
 Rate limiting is separated internally by upstream: OpenCode uses its UTC-day local guard and its own upstream free quota; Kilo uses a rolling-hour local guard matching its documented 200/hour/IP limit.
 
-## Why pi-bansos
-
-- **Zero cost** — all models free, no API key needed for supported upstreams
-- **Auto health-check** — only catalog-listed models registered at startup; dead ones skipped silently
-- **27 models from 2 sources** — 8 OpenCode Zen + 19 KiloCode gateway
-- **Local-only proxy** — binds to `127.0.0.1`, nothing exposed externally; one proxy per loaded extension, shared by every session that uses it (including OMP's in-process subagents)
-- **Optional relay egress** — route through a Vercel/Cloudflare relay to dodge per-IP rate limits, toggled live via `/bansos`
-- **Auto port bump** — if port 18080 is taken, automatically tries the next one (up to 18100)
-
-
-
 ## Install
-
-
 
 ### pi
 
@@ -80,8 +88,6 @@ Requires [pi](https://pi.dev/docs/latest/quickstart).
 ```bash
 pi install npm:pi-bansos
 ```
-
-
 
 ### OMP (Oh My Pi)
 
@@ -113,7 +119,7 @@ pi update --extensions
 Notes (from pi packages docs):
 
 - Unpinned installs (`pi install npm:pi-bansos`) get the latest npm version on update.
-- Pinned installs (`pi install npm:pi-bansos@0.4.10`) are **skipped** by `pi update --extensions` / `pi update --all` until you change the pin (install a newer `@x.y.z` or drop the pin).
+- Pinned installs (`pi install npm:pi-bansos@0.4.13`) are **skipped** by `pi update --extensions` / `pi update --all` until you change the pin (install a newer `@x.y.z` or drop the pin).
 - After update, restart pi (quit and start again) so the new extension code loads.
 
 ### OMP (Oh My Pi)
@@ -140,39 +146,38 @@ pi   # or: omp
 # /model → bansos → choose a free model
 ```
 
-Run `/bansos` any time to toggle relay egress or switch between saved relays (see [Relay](#relay-optional)).
+Startup is silent and instant: the model list comes from the local catalog cache (see [Data files](#data-files)), so nothing blocks on the network. The TUI status bar shows `relay: ON`/`OFF`, or `bansos: proxy down` / `bansos: no models` when startup failed; `/bansos status` gives the details (proxy address or bind error, models found at startup). Hide or show the status-bar entry with `/bansos hide` / `/bansos show`.
 
-Startup is silent: loading the extension writes nothing to stdout/stderr, failures included. The TUI status bar shows `relay: ON`/`OFF`, or `bansos: proxy down` / `bansos: no models` when startup failed; `/bansos status` gives the details (proxy address or bind error, models found at startup). Hide or show the status-bar entry with `/bansos hide` / `/bansos show`.
+### Commands
 
-Optional custom port:
+Run `/bansos` any time:
+
+| Command                       | What it does                                                                 |
+| ----------------------------- | ---------------------------------------------------------------------------- |
+| `/bansos`                     | Interactive menu (switch/remove relay, hide/show status bar, …)              |
+| `/bansos on`                  | Route through the relay                                                      |
+| `/bansos off`                 | Go direct (default)                                                          |
+| `/bansos status`              | Relay state, request count, saved-relay count, proxy address, models found   |
+| `/bansos url <URL>`           | Use a different relay (added to saved list)                                  |
+| `/bansos use <URL>`           | Switch to a relay and enable it (added to saved list)                        |
+| `/bansos list`                | Show all saved relays (★ = active)                                           |
+| `/bansos remove <URL>`        | Forget a saved relay (the active one can't be removed)                       |
+| `/bansos deploy`              | **Deploy a fresh Vercel relay** and switch to it                             |
+| `/bansos hide` / `/bansos show` | Hide or show the `bansos` status-bar entry (default: shown)                |
+| `/bansos refresh-models`      | Force a model-catalog re-fetch (warns when it fails; list may be stale)      |
+
+### Environment variables
 
 ```bash
-BANSOS_PORT=18081 pi   # or: BANSOS_PORT=18081 omp
+BANSOS_PORT=18081 pi   # custom proxy port (default 18080, bumps up to 18100)
 BANSOS_DEBUG=1 pi      # print startup, relay and rate-limit diagnostics on stderr
 ```
 
-
-
 ## Relay (optional)
 
-By default pi-bansos talks to the free upstreams **directly**. If your IP gets rate-limited or blocked, switch on a relay — requests then go out through a relay worker instead of your own IP. Toggle it live from inside pi, no restart:
+By default pi-bansos talks to the free upstreams **directly**. If your IP gets rate-limited or blocked, switch on a relay — requests then go out through a relay worker instead of your own IP. Toggle it live from inside pi, no restart.
 
-
-| Command                | What it does                                             |
-| ---------------------- | -------------------------------------------------------- |
-| `/bansos on`           | Route through the relay                                  |
-| `/bansos off`          | Go direct (default)                                      |
-| `/bansos status`       | Show relay state, request count, saved-relay count, proxy address or bind error, models found at startup, and the status-bar setting |
-| `/bansos url <URL>`    | Use a different relay (added to saved list)              |
-| `/bansos use <URL>`    | Switch to a relay and enable it (added to saved list)    |
-| `/bansos list`         | Show all saved relays (★ = active)                       |
-| `/bansos remove <URL>` | Forget a saved relay (the active one can't be removed)   |
-| `/bansos deploy`       | **Deploy a fresh Vercel relay** and switch to it         |
-| `/bansos hide` / `show` | Hide or show the `bansos` status-bar entry (default: shown) |
-| `/bansos`              | Interactive menu (incl. **Switch** / **Remove relay…** / **Hide status bar** or **Show status bar**) |
-
-
-The state is saved at `~/.pi/agent/pi-bansos-relay-state.json` (shared by pi and OMP, outside the package so updates keep it) and remembered across restarts — you manage it only via `/bansos`, nothing in your shell. It holds the relay on/off switch, the saved relays, and the status-bar preference. Each `/bansos` change re-reads the file at the moment it saves, applies only that change, writes it atomically, and then switches this process to the saved state — so settings changed meanwhile by another running pi/OMP process are kept, and that process's relay switch also takes effect here. Commands that only show state (`status`, `list`) don't re-read; other running processes pick up changes at their next session start or their next `/bansos` change. If saving fails, the change is not applied and the error is shown. Every relay you `deploy`, `use`, or `url` is **kept in a saved list**, so you can switch between them anytime without re-typing URLs. Any HTTP relay works (Vercel, Cloudflare, Deno, or your own). There is **no built-in default** — run `/bansos deploy` to create one or `/bansos url <URL>` to use your own.
+The relay on/off switch, the saved relay list, and the status-bar preference live in the state file (see [Data files](#data-files)) and are remembered across restarts — you manage them only via `/bansos`, nothing in your shell. Each `/bansos` change re-reads the file at the moment it saves, applies only that change, writes it atomically, and then switches this process to the saved state — so settings changed meanwhile by another running pi/OMP process are kept, and that process's relay switch also takes effect here. Commands that only show state (`status`, `list`) don't re-read; other running processes pick up changes at their next session start or their next `/bansos` change. If saving fails, the change is not applied and the error is shown. Every relay you `deploy`, `use`, or `url` is **kept in a saved list**, so you can switch between them anytime without re-typing URLs. Any HTTP relay works (Vercel, Cloudflare, Deno, or your own). There is **no built-in default** — run `/bansos deploy` to create one or `/bansos url <URL>` to use your own.
 
 **Switching between saved relays** (e.g. you deployed one and also have another):
 
@@ -185,8 +190,6 @@ The state is saved at `~/.pi/agent/pi-bansos-relay-state.json` (shared by pi and
 /bansos            → Switch relay… → pick one → active (live, no restart)
 /bansos use https://vercel-relay-yyyy.vercel.app   # or switch directly
 ```
-
-
 
 ### `/bansos deploy` — one-command Vercel relay
 
@@ -205,19 +208,30 @@ Deploys your own Node.js relay to Vercel and activates it immediately. It asks f
 
 > A relay is a single fixed exit IP, not rotation. Useful when your IP is limited; otherwise it just adds a small hop.
 
+## Data files
 
+pi-bansos writes two files into the **agent directory of the host that loaded it** — pi and OMP each keep their own state:
+
+| Host | Directory          |
+| ---- | ------------------ |
+| pi   | `~/.pi/agent/`     |
+| OMP  | `~/.omp/agent/`    |
+
+| File                        | Purpose                                                                        |
+| --------------------------- | ------------------------------------------------------------------------------ |
+| `pi-bansos-relay-state.json` | Relay on/off, saved relays, active relay, status-bar preference               |
+| `bansos-models.json`        | Cached upstream model catalog for instant startup, refreshed in background     |
+
+Both live outside the package directory, so npm updates never wipe them. The host is detected from the extension's real install path, with a process-name fallback for symlinked installs (e.g. an OMP npm plugin symlinked into a repo checkout). If you use pi and OMP side by side, each has its own relay settings and catalog cache — deleting one leaves the other untouched.
 
 ## Notes
 
 - Free upstream models are best-effort: promos can expire, model IDs can change, and rate limits may apply
-- pi-bansos health-checks at startup so unavailable models are skipped instead of registered
+- pi-bansos health-checks against the cached/live catalog at startup so unavailable models are skipped instead of registered
 - KiloCode gateway: 200 req/hr per IP, keyless
-
-
+- Catalog specs (context, max output, modalities) come from the curated model lists in the extension; the cache only stores which IDs are alive
 
 ## Uninstall
-
-
 
 ### pi
 
@@ -225,15 +239,11 @@ Deploys your own Node.js relay to Vercel and activates it immediately. It asks f
 pi remove npm:pi-bansos
 ```
 
-
-
 ### OMP
 
 ```bash
 omp plugin uninstall pi-bansos
 ```
-
-
 
 ## License
 
