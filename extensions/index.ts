@@ -736,67 +736,90 @@ function checkRateLimit(ip: string, upstream: Upstream): boolean {
 }
 
 // ── Health Check (OpenCode/Kilo catalogs; no per-model inference) ──
+const MODELS_CACHE_FILE = path.join(agentStateDir(), "bansos-models.json");
+type CatalogCache = { fetchedAt: number; opencode?: string[]; kilo?: string[] };
+function loadCatalogCache(): CatalogCache {
+	try {
+		const data: unknown = JSON.parse(fs.readFileSync(MODELS_CACHE_FILE, "utf8"));
+		if (!data || typeof data !== "object" || Array.isArray(data)) return { fetchedAt: 0 };
+		const raw = data as Record<string, unknown>;
+		const valid = (value: unknown): value is string[] =>
+			Array.isArray(value) && value.every((id) => typeof id === "string");
+		return {
+			fetchedAt: typeof raw.fetchedAt === "number" ? raw.fetchedAt : 0,
+			...(valid(raw.opencode) ? { opencode: raw.opencode } : {}),
+			...(valid(raw.kilo) ? { kilo: raw.kilo } : {}),
+		};
+	} catch {
+		return { fetchedAt: 0 };
+	}
+}
+function saveCatalogCache(next: CatalogCache): void {
+	try {
+		fs.mkdirSync(path.dirname(MODELS_CACHE_FILE), { recursive: true });
+		const file = `${MODELS_CACHE_FILE}.${process.pid}.${randomBytes(4).toString("hex")}.tmp`;
+		try {
+			fs.writeFileSync(file, JSON.stringify(next), { mode: 0o600 });
+			fs.renameSync(file, MODELS_CACHE_FILE);
+		} finally {
+			if (fs.existsSync(file)) fs.unlinkSync(file);
+		}
+	} catch (error) {
+		log("warn", "model cache save failed", { error: String(error) });
+	}
+}
+async function refreshCatalogCache(): Promise<CatalogCache> {
+	// A failed source keeps its own last-known catalog, not an empty list.
+	const [opencode, kilo] = await Promise.all([opencodeCatalog(), kiloCatalog()]);
+	const prior = loadCatalogCache();
+	const next: CatalogCache = {
+		fetchedAt: opencode || kilo ? Date.now() : prior.fetchedAt,
+		...(opencode ? { opencode: [...opencode] } : prior.opencode ? { opencode: prior.opencode } : {}),
+		...(kilo ? { kilo: [...kilo] } : prior.kilo ? { kilo: prior.kilo } : {}),
+	};
+	if (opencode || kilo) saveCatalogCache(next);
+	return next;
+}
+function modelsFromCache(cache: CatalogCache): RegisteredModel[] {
+	const opencode = new Set(cache.opencode ?? []);
+	const kilo = new Set(cache.kilo ?? []);
+	// Catalog absence is not proof of death: some free models stay callable
+	// after leaving /models (openrouter/free, verified 200). Keep catalog-listed
+	// models plus pinned extras; chat time (300s) surfaces real failures.
+	const pinnedKilo = new Set<string>(["openrouter/free"]);
+	return [
+		...KNOWN_MODELS.filter((model) => opencode.has(model.id)).map((model) => ({ ...model, source: "opencode" as const })),
+		...KILO_MODELS.filter((model) => kilo.has(model.id) || pinnedKilo.has(model.id)).map((model) => ({ ...model, source: "kilo" as const })),
+	];
+}
 // Each upstream publishes a model list; fetch it ONCE (cached) and check
 // membership. A 1-token chat probe per model was too slow (large models need
 // 10s+ for the first token). Real usability is validated at chat time (300s).
-let opencodeCatalogP: Promise<Set<string> | null> | null = null;
-function opencodeCatalog(): Promise<Set<string> | null> {
-	if (!opencodeCatalogP)
-		opencodeCatalogP = (async () => {
-			try {
-				const r = await fetch(`${API}/models`, {
-					headers: opencodeHeaders(),
-					signal: AbortSignal.timeout(10_000),
-				});
-				if (!r.ok) return null;
-				const d = await r.json();
-				return new Set<string>(
-					(d?.data ?? []).map((m: { id: string }) => m.id),
-				);
-			} catch {
-				return null;
-			}
-		})();
-	return opencodeCatalogP;
+function catalogIds(data: unknown): Set<string> | null {
+	if (!data || typeof data !== "object" || !Array.isArray((data as { data?: unknown }).data)) return null;
+	const items = (data as { data: unknown[] }).data;
+	if (!items.every((m) => m && typeof m === "object" && typeof (m as { id?: unknown }).id === "string")) return null;
+	return new Set(items.map((m) => (m as { id: string }).id));
 }
-let kiloCatalogP: Promise<Set<string> | null> | null = null;
-function kiloCatalog(): Promise<Set<string> | null> {
-	if (!kiloCatalogP)
-		kiloCatalogP = (async () => {
-			try {
-				const r = await fetch(
-					KILO_CHAT_URL.replace("/chat/completions", "/models"),
-					{
-						signal: AbortSignal.timeout(10_000),
-					},
-				);
-				if (!r.ok) return null;
-				const d = await r.json();
-				return new Set<string>(
-					(d?.data ?? []).map((m: { id: string }) => m.id),
-				);
-			} catch {
-				return null;
-			}
-		})();
-	return kiloCatalogP;
-}
-
-async function checkModelAlive(id: string): Promise<boolean> {
+async function opencodeCatalog(): Promise<Set<string> | null> {
 	try {
-		const cat = await opencodeCatalog();
-		return cat ? cat.has(id) : false;
+		const r = await fetch(`${API}/models`, {
+			headers: opencodeHeaders(),
+			signal: AbortSignal.timeout(10_000),
+		});
+		return r.ok ? catalogIds(await r.json()) : null;
 	} catch {
-		return false;
+		return null;
 	}
 }
-
-async function checkKiloAlive(id: string): Promise<boolean> {
+async function kiloCatalog(): Promise<Set<string> | null> {
 	try {
-		const cat = await kiloCatalog();
-		return cat ? cat.has(id) : false;
+		const r = await fetch(KILO_CHAT_URL.replace("/chat/completions", "/models"), {
+			signal: AbortSignal.timeout(10_000),
+		});
+		return r.ok ? catalogIds(await r.json()) : null;
 	} catch {
-		return false;
+		return null;
 	}
 }
 
@@ -1238,21 +1261,13 @@ export default async function (pi: ExtensionAPI) {
 	// the real one.
 	let providerPort: number | undefined;
 
-	const opencodeChecks = await Promise.all(
-		KNOWN_MODELS.map(async (model) => {
-			const alive = await checkModelAlive(model.id);
-			return { ...model, alive, source: "opencode" as const };
-		}),
-	);
-
-	const kiloChecks = await Promise.all(
-		KILO_MODELS.map(async (model) => {
-			const alive = await checkKiloAlive(model.id);
-			return { ...model, alive, source: "kilo" as const };
-		}),
-	);
-
-	const aliveModels = [...opencodeChecks, ...kiloChecks].filter((m) => m.alive);
+	// Register cached models without waiting for upstream. An empty/invalid
+	// cache is populated once via the current network path.
+	const cached = loadCatalogCache();
+	let aliveModels = modelsFromCache(cached);
+	if (!cached.opencode && !cached.kilo) {
+		aliveModels = modelsFromCache(await refreshCatalogCache());
+	}
 	aliveCatalog = aliveModels;
 
 	const registerBansos = (port: number) => {
@@ -1299,11 +1314,16 @@ export default async function (pi: ExtensionAPI) {
 		({ port }) => registerBansos(port),
 		() => undefined,
 	);
+	if (cached.opencode || cached.kilo) {
+		void refreshCatalogCache().catch((error) =>
+			log("warn", "model catalog refresh failed", { error: String(error) }),
+		);
+	}
 
 	// ── /bansos command: toggle relay egress live (on|off|status|url [URL]) ───
 	pi.registerCommand("bansos", {
 		description:
-			"Relay egress: on | off | status | url [URL] | deploy | list | use <URL> | remove <URL> | hide | show (status bar)",
+			"Relay egress: on | off | status | url [URL] | deploy | list | use <URL> | remove <URL> | hide | show | refresh-models",
 		getArgumentCompletions: (prefix: string) =>
 			[
 				"on",
@@ -1316,6 +1336,7 @@ export default async function (pi: ExtensionAPI) {
 				"remove",
 				"hide",
 				"show",
+				"refresh-models",
 			]
 				.filter((s) => s.startsWith(prefix))
 				.map((s) => ({ value: s, label: s })),
@@ -1467,6 +1488,13 @@ export default async function (pi: ExtensionAPI) {
 					proxyState.kind === "failed" || aliveCatalog.length === 0
 						? "warning"
 						: "info",
+				);
+			} else if (sub === "refresh-models") {
+				const cache = await refreshCatalogCache();
+				const updated = modelsFromCache(cache);
+				ctx.ui.notify(
+					`Model catalog refreshed: ${updated.length} known free models. Restart pi to update the model picker.`,
+					"info",
 				);
 			} else if (sub === "hide") {
 				setStatusBar("hidden");
