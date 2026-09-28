@@ -2,6 +2,14 @@
 
 ## Unreleased
 
+### Added
+- **`/bansos hide` / `/bansos show`** (and a menu item) toggle the `bansos` TUI status-bar entry. Saved as `statusBar` in `~/.pi/agent/pi-bansos-relay-state.json`; default shown.
+- `/bansos status` also reports the proxy address or bind error and the number of models found at startup.
+
+### Changed
+- Startup failures (no models found, proxy bind failure) no longer print on stderr; the status bar shows `bansos: proxy down` / `bansos: no models` and `/bansos status` has the detail. `BANSOS_DEBUG=1` prints them again.
+- Each `/bansos` change re-reads the state file when it saves, applies only that change, and writes atomically (temp file + rename), so it no longer overwrites settings another running pi/OMP process changed in the meantime with its stale copy. Saving creates `~/.pi/agent/` if missing; a failed save is reported and the change is not applied.
+
 ### Fixed
 - **`MaxListenersExceededWarning: 11 listening listeners added to [Server]`** — the port bump registered a new `listening` callback per busy port; it now scans with one `listening`/`error` handler pair.
 - **One proxy port per session** — every session start (OMP runs task subagents in-process) bound its own proxy, and a subagent's shutdown closed it. Sessions bound to the same loaded extension now share one proxy; it is `unref`'d and lives until the process exits, except that pi's `/reload` (which re-imports the extension) closes it first so the reloaded copy can bind again instead of leaking a port.
