@@ -205,7 +205,10 @@ function agentStateDir(): string {
 		if (real.startsWith(`${ompDir}${path.sep}`)) return ompDir;
 	} catch {}
 	const cmd = `${process.argv.join(" ")} ${process.title}`.toLowerCase();
-	if (cmd.includes("omp") && !cmd.includes("/pi")) return ompDir;
+	const basenames = process.argv
+		.map((a) => path.basename(a).replace(/\.(js|mjs|cjs|ts)$/i, ""))
+		.concat(process.title.replace(/\.(js|mjs|cjs|ts)$/i, ""));
+	if (basenames.includes("omp")) return ompDir;
 	return piDir;
 }
 function resolveRelayStatePath(): string {
@@ -1261,11 +1264,13 @@ export default async function (pi: ExtensionAPI) {
 	// the real one.
 	let providerPort: number | undefined;
 
-	// Register cached models without waiting for upstream. An empty/invalid
-	// cache is populated once via the current network path.
+	// Register cached models without waiting for upstream. Refresh inline only
+	// when the cache is empty/invalid OR yields no models (pinned extras alone
+	// don't count — they'd otherwise mask a never-populated cache).
 	const cached = loadCatalogCache();
 	let aliveModels = modelsFromCache(cached);
-	if (!cached.opencode && !cached.kilo) {
+	const cacheUsable = (cached.opencode?.length ?? 0) + (cached.kilo?.length ?? 0) > 0;
+	if (!cacheUsable) {
 		aliveModels = modelsFromCache(await refreshCatalogCache());
 	}
 	aliveCatalog = aliveModels;
@@ -1490,7 +1495,15 @@ export default async function (pi: ExtensionAPI) {
 						: "info",
 				);
 			} else if (sub === "refresh-models") {
+				const before = loadCatalogCache().fetchedAt;
 				const cache = await refreshCatalogCache();
+				if (cache.fetchedAt === before) {
+					ctx.ui.notify(
+						"Refresh failed — keeping the previous catalog; models may be stale.",
+						"warning",
+					);
+					return;
+				}
 				const updated = modelsFromCache(cache);
 				ctx.ui.notify(
 					`Model catalog refreshed: ${updated.length} known free models. Restart pi to update the model picker.`,
