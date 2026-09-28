@@ -3,6 +3,20 @@
 ## Unreleased
 
 ### Added
+- **Model catalog caching (issue #5)** — startup registers models from the last-known catalog (`bansos-models.json` in the host's agent dir, e.g. `~/.pi/agent/` or `~/.omp/agent/`) without waiting on upstream, then refreshes in the background; a failed refresh keeps the previous catalog. First run with no cache still fetches once. `/bansos refresh-models` forces a re-fetch and warns if it fails.
+- OpenCode `space-bunny-free` (reasoning, 1M context, 524K max output, text+image). Catalog IN; inference 200.
+- Kilo `qwen/qwen3.8-27b:free`.
+
+### Changed
+- Relay state (and the new catalog cache) now resolve per host: pi → `~/.pi/agent/`, OMP → `~/.omp/agent/`, detected from the extension's real install path with an argv/title basename fallback for symlinked installs. Previously hardcoded to `~/.pi/agent/`.
+
+### Removed
+- Kilo `minimax/minimax-m3:free`, `minimax/minimax-m2.7:free`, `thinkingmachines/inkling:free` (gone from the live catalog). `openrouter/free` stays pinned: absent from `/models` but chat still serves it.
+
+### Fixed
+- **Kilo 401 `INVALID_TOKEN`** — requests no longer send the stale `Authorization: Bearer kilo-free` header; the free gateway is keyless and rejects it. Catalog fetch and chat proxying both affected.
+
+### Added
 - **`/bansos hide` / `/bansos show`** (and a menu item) toggle the `bansos` TUI status-bar entry. Saved as `statusBar` in `~/.pi/agent/pi-bansos-relay-state.json`; default shown.
 - `/bansos status` also reports the proxy address or bind error and the number of models found at startup.
 
