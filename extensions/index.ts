@@ -754,7 +754,6 @@ function kiloCatalog(): Promise<Set<string> | null> {
 				const r = await fetch(
 					KILO_CHAT_URL.replace("/chat/completions", "/models"),
 					{
-						headers: { Authorization: "Bearer kilo-free" },
 						signal: AbortSignal.timeout(10_000),
 					},
 				);
@@ -949,7 +948,6 @@ function startProxy(
 						method: "POST",
 						headers: {
 							"Content-Type": "application/json",
-							Authorization: "Bearer kilo-free",
 						},
 						body: JSON.stringify(parsedBody),
 						signal: AbortSignal.timeout(300_000),
