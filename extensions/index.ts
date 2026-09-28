@@ -402,7 +402,7 @@ interface ModelDef {
 }
 
 // OpenCode Zen free models verified against the live catalog and inference APIs.
-// Last verified: 2026-09-22 — added mimo-v2.6-flash-free (catalog IN, chat 200).
+// Last verified: 2026-09-28 — added space-bunny-free (catalog IN, chat 200).
 const KNOWN_MODELS: ModelDef[] = [
 	{
 		id: "muse-spark-1.3-contributor-free",
@@ -484,10 +484,18 @@ const KNOWN_MODELS: ModelDef[] = [
 		contextWindow: 200_000,
 		maxTokens: 32_000,
 	},
+	{
+		id: "space-bunny-free",
+		name: "Space Bunny",
+		reasoning: true,
+		contextWindow: 1_000_000,
+		maxTokens: 524_288,
+		input: ["text", "image"],
+	},
 ];
 
 // KiloCode gateway free models (keyless — https://kilo.ai/docs/gateway).
-// Specs match the live catalog fetched on 2026-09-07.
+// Specs match the live catalog fetched on 2026-09-28.
 const KILO_MODELS: ModelDef[] = [
 	{
 		id: "kilo-auto/free",
@@ -613,15 +621,6 @@ const KILO_MODELS: ModelDef[] = [
 		thinkingFormat: "openrouter",
 	},
 	{
-		id: "minimax/minimax-m3:free",
-		name: "MiniMax M3 Free",
-		reasoning: true,
-		contextWindow: 1_048_576,
-		maxTokens: 943_718,
-		input: ["text", "image"],
-		thinkingFormat: "openrouter",
-	},
-	{
 		id: "thinkingmachines/inkling-small:free",
 		name: "Inkling Small Free",
 		reasoning: true,
@@ -631,20 +630,12 @@ const KILO_MODELS: ModelDef[] = [
 		thinkingFormat: "openrouter",
 	},
 	{
-		id: "thinkingmachines/inkling:free",
-		name: "Inkling Free",
+		id: "qwen/qwen3.8-27b:free",
+		name: "Qwen3.8 27B Free",
 		reasoning: true,
-		contextWindow: 1_048_576,
-		maxTokens: 262_144,
+		contextWindow: 262_144,
+		maxTokens: 235_929,
 		input: ["text", "image"],
-		thinkingFormat: "openrouter",
-	},
-	{
-		id: "minimax/minimax-m2.7:free",
-		name: "MiniMax M2.7 Free",
-		reasoning: true,
-		contextWindow: 196_608,
-		maxTokens: 176_947,
 		thinkingFormat: "openrouter",
 	},
 ];
