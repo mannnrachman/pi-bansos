@@ -187,11 +187,33 @@ function transformOpencodeBody(
 // user's personal relay URL. Bring your own via /bansos deploy or /bansos url.
 const DEFAULT_RELAY_URL = "";
 // State lives OUTSIDE the package dir so npm updates don't wipe it.
-// Uses ~/.pi/agent/pi-bansos-relay-state.json (stable), falls back to
-// package-root .relay-state.json for dev/local installs.
+// Path follows the host that loaded the extension: pi → ~/.pi/agent/,
+// OMP → ~/.omp/agent/. Two-layer detection because OMP installs are often
+// symlinks to a repo (Node resolves those to the real path):
+//   1. the extension's own install path, when it clearly sits under .pi/.omp
+//   2. an explicit host marker (process title / argv of the running CLI)
+// Otherwise (repo checkout, dev) fall back to ~/.pi/agent/.
+function agentStateDir(): string {
+	const home = homedir();
+	const piDir = path.join(home, ".pi", "agent");
+	const ompDir = path.join(home, ".omp", "agent");
+	try {
+		const self = fileURLToPath(import.meta.url);
+		// realpath resolves symlinks inside the tree (e.g. OMP plugin symlinks)
+		const real = fs.realpathSync(self);
+		if (real.startsWith(`${piDir}${path.sep}`)) return piDir;
+		if (real.startsWith(`${ompDir}${path.sep}`)) return ompDir;
+	} catch {}
+	const cmd = `${process.argv.join(" ")} ${process.title}`.toLowerCase();
+	if (cmd.includes("omp") && !cmd.includes("/pi")) return ompDir;
+	return piDir;
+}
 function resolveRelayStatePath(): string {
 	try {
-		return path.join(homedir(), ".pi", "agent", "pi-bansos-relay-state.json");
+		return path.join(
+			agentStateDir(),
+			"pi-bansos-relay-state.json",
+		);
 	} catch {
 		// homedir() unavailable — fallback to package root (dev mode)
 		return path.join(
