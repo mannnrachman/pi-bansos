@@ -3,14 +3,17 @@
 ## Unreleased
 
 ### Added
-- OpenCode `fledge-alpha-free` and `longcat-2.5-preview-free` — catalog IN, chat 200 via the proxy (specs conservative: upstream publishes none; `space-bunny-free`-class reasoning models).
+- OpenCode `ling-3.1-flash-free`, `fledge-alpha-free`, `longcat-2.5-preview-free` — catalog IN, chat 200 via the proxy (specs conservative: upstream publishes none).
 - Kilo `apodex/apodex-1.1-mini:free` — reasoning-first research/forecasting mini (262K ctx / 236K out, text-only, `reasoning` field verified live).
+
+### Fixed
+- **Root-caused the OpenCode free-tier 403 gate** (bisect, informed by 9router PRs [#4111](https://github.com/decolua/9router/pull/4111)/[#4146](https://github.com/decolua/9router/pull/4146)): beyond the UA/session fingerprint, the payload must carry the `bash` + `read` tool pair. Our 4-tool fingerprint (`bash`/`glob`/`grep`/`read`) always satisfies it — `ling-3.1-flash-free` initially looked 403-gated but passes with the standard payload; it is now registered.
 
 ### Removed
 - Kilo `inclusionai/ling-3.0-flash-fin:free` — gone from the live catalog (replaced by the OpenCode-side `ling-3.0-flash-fin-free`, which stays).
 
 ### Rejected after live testing (2026-10-05)
-- OpenCode `jev-1.13-free` (500 upstream), `ling-3.1-flash-free` (403 FreeTierError via proxy), `deepseek-v4-flash-free` (400 Model is unavailable). Will re-test next catalog sweep.
+- OpenCode `jev-1.13-free` (500 upstream), `deepseek-v4-flash-free` (400 Model is unavailable).
 
 ## [0.4.13] - 2026-09-28
 

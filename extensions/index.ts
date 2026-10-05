@@ -427,10 +427,11 @@ interface ModelDef {
 }
 
 // OpenCode Zen free models verified against the live catalog and inference APIs.
-// Last verified: 2026-10-05 — added fledge-alpha-free, longcat-2.5-preview-free
-// (both catalog IN, chat 200 via proxy; specs conservative — upstream publishes
-// none). jev-1.13-free (500), ling-3.1-flash-free (403), deepseek-v4-flash-free
-// (400) rejected live.
+// Last verified: 2026-10-05 — added ling-3.1-flash-free, fledge-alpha-free,
+// longcat-2.5-preview-free (catalog IN, chat 200 via proxy; specs conservative
+// — upstream publishes none). Free-tier gate requires bash+read tool pair in
+// the payload (verified by bisect; the 4-tool fingerprint satisfies it).
+// jev-1.13-free (500 upstream), deepseek-v4-flash-free (400) rejected live.
 const KNOWN_MODELS: ModelDef[] = [
 	{
 		id: "muse-spark-1.3-contributor-free",
@@ -519,6 +520,13 @@ const KNOWN_MODELS: ModelDef[] = [
 		contextWindow: 1_000_000,
 		maxTokens: 524_288,
 		input: ["text", "image"],
+	},
+	{
+		id: "ling-3.1-flash-free",
+		name: "Ling 3.1 Flash Free",
+		reasoning: true,
+		contextWindow: 262_144,
+		maxTokens: 32_768,
 	},
 	{
 		id: "fledge-alpha-free",

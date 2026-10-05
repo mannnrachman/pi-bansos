@@ -22,7 +22,7 @@ Free model provider for **[pi](https://pi.dev)** ([browse packages](https://pi.d
 ## Features
 
 - **Zero cost** — all models free, no API key needed for supported upstreams
-- **28 models from 2 sources** — 11 OpenCode Zen + 17 KiloCode gateway
+- **29 models from 2 sources** — 12 OpenCode Zen + 17 KiloCode gateway
 - **Instant startup** — the model catalog is cached locally and registered without waiting on upstream; it refreshes in the background
 - **Auto health-check** — only catalog-listed models registered; dead ones skipped silently
 - **Local-only proxy** — binds to `127.0.0.1`, nothing exposed externally; one proxy per loaded extension, shared by every session that uses it (including OMP's in-process subagents)
@@ -31,9 +31,9 @@ Free model provider for **[pi](https://pi.dev)** ([browse packages](https://pi.d
 
 ## Models
 
-**28 total: 11 OpenCode + 17 KiloCode.** All models are free. The provider is one `bansos` entry, but model names show their upstream: **OpenCode** or **KiloCode**. The startup check only verifies catalog membership; upstream access can still change between startup and a request.
+**29 total: 12 OpenCode + 17 KiloCode.** All models are free. The provider is one `bansos` entry, but model names show their upstream: **OpenCode** or **KiloCode**. The startup check only verifies catalog membership; upstream access can still change between startup and a request.
 
-### OpenCode Zen (11 models)
+### OpenCode Zen (12 models)
 
 | Model ID                          | Name                        | Vision | API       | Context     | Max Output  | Reasoning |
 | --------------------------------- | --------------------------- | ------ | --------- | ----------- | ----------- | --------- |
@@ -42,6 +42,7 @@ Free model provider for **[pi](https://pi.dev)** ([browse packages](https://pi.d
 | `mimo-v2.5-free`                  | MiMo V2.5 Free              | ✅      | chat      | 200K tokens | 32K tokens  | ✅         |
 | `mimo-v2.6-flash-free`            | MiMo V2.6 Flash Free        | ✅      | chat      | 200K tokens | 32K tokens  | ✅         |
 | `space-bunny-free`                | Space Bunny                 | ✅      | chat      | 1M tokens   | 524K tokens | ✅         |
+| `ling-3.1-flash-free`             | Ling 3.1 Flash Free         | ❌      | chat      | 262K tokens | 32K tokens  | ✅         |
 | `fledge-alpha-free`               | Fledge Alpha                | ❌      | chat      | 200K tokens | 65K tokens  | ✅         |
 | `longcat-2.5-preview-free`        | LongCat 2.5 Preview         | ❌      | chat      | 1M tokens   | 131K tokens | ✅         |
 | `ling-3.0-flash-fin-free`         | Ling 3.0 Flash Fin Free     | ❌      | chat      | 262K tokens | 32K tokens  | ✅         |
