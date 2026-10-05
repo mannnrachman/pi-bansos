@@ -2,21 +2,21 @@
 
 ## [0.4.14] - 2026-10-05
 
-Session log: catalog sweep 2026-10-05 (4 new models, 1 dead), zen free-tier gate root-caused (fingerprint hardened per pi-freeflow/bansos-router research), and relay failover added (spread rotation prototyped then dropped — Vercel relays share one NAT egress).
+Session log: catalog sweep 2026-10-05 (4 new models, 1 dead), zen free-tier gate root-caused and fingerprint hardened, and relay failover added.
 
 ### Added
 - OpenCode `ling-3.1-flash-free`, `fledge-alpha-free`, `longcat-2.5-preview-free` — catalog IN, chat 200 via the proxy (specs conservative: upstream publishes none).
 - Kilo `apodex/apodex-1.1-mini:free` — reasoning-first research/forecasting mini (262K ctx / 236K out, text-only, `reasoning` field verified live).
-- **Live UA tracking** (pi-freeflow pattern): the gate `User-Agent` version now follows the live `opencode-ai` npm release (background refresh at startup, disk cache, `BANSOS_OPENCODE_UA` env override, pinned `1.18.31` fallback) — a stricter gate can no longer strand users on a stale version.
-- **Relay failover with escalating cooldown** (pi-freeflow / llm-keypool patterns): a relay that answers 429/408/5xx or drops the socket now cools down (429 → 90 s base, transport → 30 s, ×2 per consecutive failure, cap 15 min) and the request rolls to the next healthy relay, falling back to direct when the pool is exhausted. Previously a rate-limited relay surfaced its 429 straight to the session and a dead relay only fell back direct on a fetch *throw*. Client-error 4xx (except 429/408) return as-is: they are the payload's fault, not the relay's. Verified end-to-end with a simulated 429 relay rolling over to a pass-through relay. (A `spread` round-robin mode was prototyped and dropped: Vercel relays share one NAT egress pool, so extra relays add no per-IP diversity — failover alone is the real fix.)
+- **Live UA tracking**: the gate `User-Agent` version now follows the live `opencode-ai` npm release (background refresh at startup, disk cache, `BANSOS_OPENCODE_UA` env override, pinned `1.18.31` fallback) — a stricter gate can no longer strand users on a stale version.
+- **Relay failover with escalating cooldown**: a relay that answers 429/408/5xx or drops the socket now cools down (429 → 90 s base, transport → 30 s, ×2 per consecutive failure, cap 15 min) and the request rolls to the next healthy relay, falling back to direct when the pool is exhausted. Previously a rate-limited relay surfaced its 429 straight to the session and a dead relay only fell back direct on a fetch *throw*. Client-error 4xx (except 429/408) return as-is: they are the payload's fault, not the relay's. Verified end-to-end with a simulated 429 relay rolling over to a pass-through relay. (A `spread` round-robin mode was prototyped and dropped: Vercel relays share one NAT egress pool, so extra relays add no per-IP diversity — failover alone is the real fix.)
 
-### Changed — free-tier fingerprint hardened (patterns from [pi-freeflow](https://github.com/trefeon/pi-freeflow) & [bansos-router](https://github.com/ihsan-ramadhan/bansos-router))
-- Fingerprint tool set expanded to the full sextet `{bash, glob, grep, read, edit, write}` (freeflow ships the same; bisect showed `bash`+`read` is the minimum the gate requires).
-- Injected decoy tools now set `tool_choice: "none"` on the chat wire (bansos-router): the model can no longer burn a reply calling tools that don't exist downstream. Caller-declared tools are unaffected — pi sends its own list, which marks them present and skips injection.
-- `x-opencode-project` now sends a 40-char hex project id (was `"global"`) plus `x-session-affinity`, `b3`, and `traceparent` distributed-tracing headers — the shape real opencode clients emit (9router #4111, bansos-router).
+### Changed — free-tier fingerprint hardened
+- Fingerprint tool set expanded to the full sextet `{bash, glob, grep, read, edit, write}` (bisect showed `bash`+`read` is the minimum the gate requires).
+- Injected decoy tools now set `tool_choice: "none"` on the chat wire: the model can no longer burn a reply calling tools that don't exist downstream. Caller-declared tools are unaffected — pi sends its own list, which marks them present and skips injection.
+- `x-opencode-project` now sends a 40-char hex project id (was `"global"`) plus `x-session-affinity`, `b3`, and `traceparent` distributed-tracing headers — the shape real opencode clients emit.
 
 ### Fixed
-- **Root-caused the OpenCode free-tier 403 gate** (bisect, informed by 9router PRs [#4111](https://github.com/decolua/9router/pull/4111)/[#4146](https://github.com/decolua/9router/pull/4146)): beyond the UA/session fingerprint, the payload must carry the `bash` + `read` tool pair. Our fingerprint always satisfies it — `ling-3.1-flash-free` initially looked 403-gated but passes with the standard payload; it is now registered.
+- **Root-caused the OpenCode free-tier 403 gate**: beyond the UA/session fingerprint, the payload must carry the `bash` + `read` tool pair. Our fingerprint always satisfies it — `ling-3.1-flash-free` initially looked 403-gated but passes with the standard payload; it is now registered.
 
 ### Removed
 - Kilo `inclusionai/ling-3.0-flash-fin:free` — gone from the live catalog (replaced by the OpenCode-side `ling-3.0-flash-fin-free`, which stays).
