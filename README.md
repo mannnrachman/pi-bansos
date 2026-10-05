@@ -174,6 +174,7 @@ Run `/bansos` any time:
 ```bash
 BANSOS_PORT=18081 pi   # custom proxy port (default 18080, bumps up to 18100)
 BANSOS_DEBUG=1 pi      # print startup, relay and rate-limit diagnostics on stderr
+BANSOS_OPENCODE_UA=x.y.z pi  # pin the opencode User-Agent version (default: auto-track npm latest, fallback 1.18.31)
 ```
 
 ## Relay (optional)

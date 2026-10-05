@@ -5,9 +5,15 @@
 ### Added
 - OpenCode `ling-3.1-flash-free`, `fledge-alpha-free`, `longcat-2.5-preview-free` — catalog IN, chat 200 via the proxy (specs conservative: upstream publishes none).
 - Kilo `apodex/apodex-1.1-mini:free` — reasoning-first research/forecasting mini (262K ctx / 236K out, text-only, `reasoning` field verified live).
+- **Live UA tracking** (pi-freeflow pattern): the gate `User-Agent` version now follows the live `opencode-ai` npm release (background refresh at startup, disk cache, `BANSOS_OPENCODE_UA` env override, pinned `1.18.31` fallback) — a stricter gate can no longer strand users on a stale version.
+
+### Changed — free-tier fingerprint hardened (patterns from [pi-freeflow](https://github.com/trefeon/pi-freeflow) & [bansos-router](https://github.com/ihsan-ramadhan/bansos-router))
+- Fingerprint tool set expanded to the full sextet `{bash, glob, grep, read, edit, write}` (freeflow ships the same; bisect showed `bash`+`read` is the minimum the gate requires).
+- Injected decoy tools now set `tool_choice: "none"` on the chat wire (bansos-router): the model can no longer burn a reply calling tools that don't exist downstream. Caller-declared tools are unaffected — pi sends its own list, which marks them present and skips injection.
+- `x-opencode-project` now sends a 40-char hex project id (was `"global"`) plus `x-session-affinity`, `b3`, and `traceparent` distributed-tracing headers — the shape real opencode clients emit (9router #4111, bansos-router).
 
 ### Fixed
-- **Root-caused the OpenCode free-tier 403 gate** (bisect, informed by 9router PRs [#4111](https://github.com/decolua/9router/pull/4111)/[#4146](https://github.com/decolua/9router/pull/4146)): beyond the UA/session fingerprint, the payload must carry the `bash` + `read` tool pair. Our 4-tool fingerprint (`bash`/`glob`/`grep`/`read`) always satisfies it — `ling-3.1-flash-free` initially looked 403-gated but passes with the standard payload; it is now registered.
+- **Root-caused the OpenCode free-tier 403 gate** (bisect, informed by 9router PRs [#4111](https://github.com/decolua/9router/pull/4111)/[#4146](https://github.com/decolua/9router/pull/4146)): beyond the UA/session fingerprint, the payload must carry the `bash` + `read` tool pair. Our fingerprint always satisfies it — `ling-3.1-flash-free` initially looked 403-gated but passes with the standard payload; it is now registered.
 
 ### Removed
 - Kilo `inclusionai/ling-3.0-flash-fin:free` — gone from the live catalog (replaced by the OpenCode-side `ling-3.0-flash-fin-free`, which stays).

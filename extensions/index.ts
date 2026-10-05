@@ -25,11 +25,29 @@ const API = `${UPSTREAM_OPENCODE}/v1`;
 
 // OpenCode Zen free-tier client fingerprint (verified live 2026-09-18; same
 // gates as 9router PR #4132). Missing any one → 403 FreeTierError.
-const OPENCODE_UA = "opencode/1.18.31";
-const OPENCODE_SESSION_RE = /^ses_[0-9a-f]{12}[0-9A-Za-z]{14}$/;
+// UA version tracks the live opencode-ai npm release (pi-freeflow pattern):
+// env override > live version > disk cache > pinned fallback. The gate has
+// rejected stale UA versions before; auto-refresh keeps us off that cliff.
+const OPENCODE_UA_FALLBACK = "1.18.31";
+const OPENCODE_UA_VERSION_RE = /^\d+\.\d+\.\d+$/;
+const OPENCODE_USER_AGENT_ENV = "BANSOS_OPENCODE_UA";
 const BASE62 =
 	"0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz";
-const OPENCODE_FINGERPRINT_TOOLS = ["bash", "glob", "grep", "read"] as const;
+// Gate requires the bash+read pair at minimum (bisect 2026-10-05); freeflow
+// ships the full sextet {bash,glob,grep,read,edit,write} — match it.
+const OPENCODE_FINGERPRINT_TOOLS = [
+	"bash",
+	"glob",
+	"grep",
+	"read",
+	"edit",
+	"write",
+] as const;
+// Project id: zen clients send a 40-char hex project hash (9router #4111,
+// bansos-router). A bare "global" still passes today but hex is the shape
+// real clients emit — cheap insurance against a stricter gate.
+const OPENCODE_PROJECT_ID = randomBytes(20).toString("hex");
+const OPENCODE_SESSION_RE = /^ses_[0-9a-f]{12}[0-9A-Za-z]{14}$/;
 const OPENCODE_RESPONSES_MODELS = new Set([
 	"muse-spark-1.2-contributor-free",
 	"muse-spark-1.3-contributor-free",
@@ -74,14 +92,65 @@ if (!OPENCODE_SESSION_RE.test(OPENCODE_SESSION)) {
 	throw new Error("opencode session id generation failed shape check");
 }
 
+// Live UA resolution — offline-safe, never throws, never blocks.
+// Precedence: env override > in-process live version > disk cache > pinned.
+let liveOpenCodeVersion: string | null = null;
+function getOpenCodeUA(): string {
+	const override = process.env[OPENCODE_USER_AGENT_ENV]?.trim();
+	if (override) return override.startsWith("opencode/") ? override : `opencode/${override}`;
+	if (liveOpenCodeVersion && OPENCODE_UA_VERSION_RE.test(liveOpenCodeVersion))
+		return `opencode/${liveOpenCodeVersion}`;
+	return `opencode/${OPENCODE_UA_FALLBACK}`;
+}
+function uaVersionCacheFile(): string | null {
+	try {
+		return path.join(agentStateDir(), "bansos-opencode-version.json");
+	} catch {
+		return null;
+	}
+}
+/** Fire-and-forget: track the live opencode-ai npm version so the gate never
+ *  sees a stale UA. Failure keeps the pinned fallback (pi-freeflow pattern). */
+async function refreshOpenCodeUA(): Promise<void> {
+	if (process.env[OPENCODE_USER_AGENT_ENV]?.trim()) return;
+	try {
+		const r = await fetch("https://registry.npmjs.org/opencode-ai/latest", {
+			signal: AbortSignal.timeout(10_000),
+		});
+		if (!r.ok) return;
+		const version = ((await r.json()) as { version?: unknown })?.version;
+		if (typeof version !== "string" || !OPENCODE_UA_VERSION_RE.test(version)) return;
+		if (version === liveOpenCodeVersion) return;
+		liveOpenCodeVersion = version;
+		const file = uaVersionCacheFile();
+		if (file) {
+			try {
+				fs.mkdirSync(path.dirname(file), { recursive: true });
+				fs.writeFileSync(file, JSON.stringify({ version, checkedAt: Date.now() }), {
+					mode: 0o600,
+				});
+			} catch {}
+		}
+		log("info", "opencode UA version refreshed", { version });
+	} catch {
+		// offline / npm unreachable — pinned fallback keeps working
+	}
+}
+
 function opencodeHeaders(): Record<string, string> {
+	const traceId = randomBytes(16).toString("hex");
+	const spanId = randomBytes(8).toString("hex");
 	return {
-		"User-Agent": OPENCODE_UA,
+		"User-Agent": getOpenCodeUA(),
 		Authorization: "Bearer public",
 		"x-opencode-client": "desktop",
-		"x-opencode-project": "global",
+		"x-opencode-project": OPENCODE_PROJECT_ID,
 		"x-opencode-session": OPENCODE_SESSION,
+		"x-session-affinity": OPENCODE_SESSION,
 		"x-opencode-request": generateRequestId(),
+		// Distributed-tracing headers real opencode clients emit (bansos-router).
+		b3: `${traceId}-${spanId}-1-${spanId}`,
+		traceparent: `00-${traceId}-${spanId}-01`,
 		Accept: "text/event-stream",
 	};
 }
@@ -109,6 +178,7 @@ function ensureChatFingerprintTools(body: Record<string, unknown>): void {
 		const name = toolNameOf(tool);
 		if (name) present.add(name);
 	}
+	let injected = false;
 	for (const name of OPENCODE_FINGERPRINT_TOOLS) {
 		if (present.has(name)) continue;
 		(body.tools as unknown[]).push({
@@ -119,7 +189,13 @@ function ensureChatFingerprintTools(body: Record<string, unknown>): void {
 				parameters: { type: "object", properties: {} },
 			},
 		});
+		injected = true;
 	}
+	// Injected decoys must never be callable (bansos-router): the model would
+	// burn the reply calling tools that don't exist downstream. "none" hides
+	// every injected name; caller-declared tools stay callable because pi
+	// always sends an explicit tool list alongside.
+	if (injected && body.tool_choice === undefined) body.tool_choice = "none";
 }
 
 function ensureResponsesFingerprintTools(body: Record<string, unknown>): void {
@@ -138,6 +214,8 @@ function ensureResponsesFingerprintTools(body: Record<string, unknown>): void {
 			parameters: { type: "object", properties: {} },
 		});
 	}
+	// Responses wire rejects tool_choice:"none" (400 only-"auto"-supported);
+	// injected calls are instead cloaked downstream when they appear.
 }
 
 function sanitizeResponsesItems(body: Record<string, unknown>): void {
@@ -1349,6 +1427,8 @@ export default async function (pi: ExtensionAPI) {
 			log("warn", "model catalog refresh failed", { error: String(error) }),
 		);
 	}
+	// Keep the gate UA fresh without blocking startup (pi-freeflow pattern).
+	void refreshOpenCodeUA().catch(() => undefined);
 
 	// ── /bansos command: toggle relay egress live (on|off|status|url [URL]) ───
 	pi.registerCommand("bansos", {
