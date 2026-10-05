@@ -23,8 +23,8 @@ const BANSOS_DEBUG = process.env.BANSOS_DEBUG === "1";
 const HOST = "127.0.0.1";
 const API = `${UPSTREAM_OPENCODE}/v1`;
 
-// OpenCode Zen free-tier client fingerprint (verified live 2026-09-18; same
-// gates as 9router PR #4132). Missing any one → 403 FreeTierError.
+// OpenCode Zen free-tier client fingerprint (verified live 2026-09-18).
+// Missing any one → 403 FreeTierError.
 // UA version tracks the live opencode-ai npm release:
 // env override > live version > disk cache > pinned fallback. The gate has
 // rejected stale UA versions before; auto-refresh keeps us off that cliff.
@@ -43,9 +43,9 @@ const OPENCODE_FINGERPRINT_TOOLS = [
 	"edit",
 	"write",
 ] as const;
-// Project id: zen clients send a 40-char hex project hash (9router #4111,
-// a bare "global" still passes today but hex is the shape
-// real clients emit — cheap insurance against a stricter gate.
+// Project id: zen clients send a 40-char hex project hash; a bare "global"
+// still passes today but hex is the shape real clients emit — cheap
+// insurance against a stricter gate.
 const OPENCODE_PROJECT_ID = randomBytes(20).toString("hex");
 const OPENCODE_SESSION_RE = /^ses_[0-9a-f]{12}[0-9A-Za-z]{14}$/;
 const OPENCODE_RESPONSES_MODELS = new Set([
@@ -258,8 +258,8 @@ function transformOpencodeBody(
 }
 
 // ── Relay egress (vercel/cloudflare worker, x-relay-target pattern) ──────────
-// Same logic as 9router ProxyFetch: when enabled, redirect upstream calls to a
-// relay URL and inject x-relay-target / x-relay-path headers. Body untouched →
+// When enabled, redirect upstream calls to a relay URL and inject
+// x-relay-target / x-relay-path headers. Body untouched →
 // SSE streaming passes through unchanged. Toggle live via /bansos command.
 // No built-in default relay — a published package must not bake in any one
 // user's personal relay URL. Bring your own via /bansos deploy or /bansos url.
@@ -357,7 +357,7 @@ function resolveRelayState(): RelayState {
 	const s = loadRelayState();
 	// migrate legacy {enabled,url}: seed the known list with default + active url
 	if (!s.relays.length) {
-		ensureRelay(s, DEFAULT_RELAY_URL, "9Router default");
+		ensureRelay(s, DEFAULT_RELAY_URL, "default relay");
 		if (s.url && s.url !== DEFAULT_RELAY_URL) ensureRelay(s, s.url, "previous");
 	}
 	if (!s.url) s.url = DEFAULT_RELAY_URL;
@@ -458,10 +458,10 @@ async function relayFetch(
 	return fetch(url, opts);
 }
 
-// ── Deploy a fresh Vercel relay (same flow as 9Router) ───────────────────────
+// ── Deploy a fresh Vercel relay ──────────────────────────────────────────────
 // Token is used in-memory only and NEVER persisted. Resulting URL is saved to
 // the relay state and activated. Worker uses the x-relay-target/x-relay-path
-// pattern, identical to the cloudflare/vercel relays 9Router deploys.
+// pattern — a standard edge worker fetch pass-through.
 const VERCEL_API = "https://api.vercel.com";
 const VERCEL_RELAY_WORKER = `// Only the 2 upstreams pi-bansos talks to. Anything else = open proxy abuse.
 const ALLOWED_TARGETS = ["https://opencode.ai", "https://api.kilo.ai"];
@@ -530,7 +530,7 @@ async function deployVercelRelay(
 		headers: auth,
 		body: JSON.stringify({ ssoProtection: null }),
 	});
-	// 3. poll until READY (3s interval, 120s timeout — same as 9Router)
+	// 3. poll until READY (3s interval, 120s timeout)
 	onProgress?.("Waiting for deployment to go live…");
 	const deadline = Date.now() + 120_000;
 	while (Date.now() < deadline) {

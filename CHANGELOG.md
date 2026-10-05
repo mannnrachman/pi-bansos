@@ -78,7 +78,7 @@ Everything from the Sept-28 working session: issues #5/#6/#7 (PRs #8/#9), the Ki
 ## [0.4.10] - 2026-09-18
 
 ### Fixed
-- **OpenCode free models 403 `FreeTierError`** — Zen now fingerprints the official client. Proxy sends `User-Agent: opencode/1.18.31`, canonical `ses_`/`msg_` ids, `Bearer public`, injects tool quartet `{bash, glob, grep, read}`, forces `stream: true`, and for Muse Responses sets `store: false` + strips prior reasoning items (same gates as 9router #4132).
+- **OpenCode free models 403 `FreeTierError`** — Zen now fingerprints the official client. Proxy sends `User-Agent: opencode/1.18.31`, canonical `ses_`/`msg_` ids, `Bearer public`, injects tool quartet `{bash, glob, grep, read}`, forces `stream: true`, and for Muse Responses sets `store: false` + strips prior reasoning items
 
 ## [0.4.9] - 2026-09-07
 
@@ -140,7 +140,7 @@ Everything from the Sept-28 working session: issues #5/#6/#7 (PRs #8/#9), the Ki
 ## [0.4.4] - 2026-08-05
 
 ### Fixed
-- **Vercel relay deploy fails with "Function Runtimes must have a valid version"** — vercel.json no longer declares a `functions.runtime`; relay worker runs on `runtime: "edge"` (same proven pattern as 9Router). Deployment now succeeds instead of ERRORing in build
+- **Vercel relay deploy fails with "Function Runtimes must have a valid version"** — vercel.json no longer declares a `functions.runtime`; relay worker runs on `runtime: "edge"`. Deployment now succeeds instead of ERRORing in build
 - **Vercel relay rejects large `max_tokens`** — requests with `max_tokens > 131072` through the relay returned 400 "Upstream request failed" (Vercel response size/duration limits). Added `RELAY_MAX_TOKENS` clamp at the relay layer: only activated when relay is enabled, direct mode stays unconstrained, and model config (`KNOWN_MODELS`, e.g. `deepseek-v4-flash-free` at 384000) remains accurate
 
 ### Changed
