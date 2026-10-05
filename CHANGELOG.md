@@ -1,6 +1,8 @@
 # Changelog
 
-## Unreleased
+## [0.4.14] - 2026-10-05
+
+Session log: catalog sweep 2026-10-05 (4 new models, 1 dead), zen free-tier gate root-caused (fingerprint hardened per pi-freeflow/bansos-router research), and relay failover added (spread rotation prototyped then dropped — Vercel relays share one NAT egress).
 
 ### Added
 - OpenCode `ling-3.1-flash-free`, `fledge-alpha-free`, `longcat-2.5-preview-free` — catalog IN, chat 200 via the proxy (specs conservative: upstream publishes none).
