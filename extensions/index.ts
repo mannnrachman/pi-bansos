@@ -309,11 +309,16 @@ const RELAY_STATE_FILE = resolveRelayStatePath();
 type KnownRelay = { url: string; label?: string; addedAt?: string };
 // TUI status-bar entry for the relay/proxy state; display preference only.
 type StatusBar = "shown" | "hidden";
+// Egress rotation across the relay pool: sticky keeps one active relay
+// (failover only on failure), spread round-robins every request across
+// healthy relays so parallel sessions land on different egress IPs.
+type RotationMode = "sticky" | "spread";
 type RelayState = {
 	enabled: boolean;
 	url: string;
 	relays: KnownRelay[];
 	statusBar: StatusBar;
+	rotation: RotationMode;
 };
 function loadRelayState(): RelayState {
 	try {
@@ -324,9 +329,16 @@ function loadRelayState(): RelayState {
 			url: typeof s?.url === "string" ? s.url.trim() : "",
 			relays,
 			statusBar: s?.statusBar === "hidden" ? "hidden" : "shown",
+			rotation: s?.rotation === "spread" ? "spread" : "sticky",
 		};
 	} catch {
-		return { enabled: false, url: "", relays: [], statusBar: "shown" };
+		return {
+			enabled: false,
+			url: "",
+			relays: [],
+			statusBar: "shown",
+			rotation: "sticky",
+		};
 	}
 }
 type SaveResult = { ok: true } | { ok: false; error: string };
@@ -366,33 +378,101 @@ function resolveRelayState(): RelayState {
 let relayState: RelayState = resolveRelayState();
 let relayHits = 0;
 
+// ── Relay pool health & rotation (pi-freeflow / llm-keypool patterns) ───────
+// A relay that 429s is an egress IP at its per-IP quota (both our upstreams
+// are keyless: limits attach to the IP, so rotating the exit IP IS the fix).
+// Cooldowns escalate with consecutive failures so chronic offenders back off.
+type RelayHealth = { consecutiveFailures: number; cooldownUntil: number };
+const relayHealth = new Map<string, RelayHealth>();
+let spreadCursor = 0;
+function markRelaySuccess(url: string): void {
+	relayHealth.delete(url);
+}
+function markRelayFailure(url: string, status?: number): void {
+	const prev = relayHealth.get(url) ?? { consecutiveFailures: 0, cooldownUntil: 0 };
+	const consecutive = prev.consecutiveFailures + 1;
+	// 429 = per-IP quota hit: give the IP a real rest (90s base). Transport
+	// errors / 5xx are usually transient: 30s. Escalate ×2 per consecutive
+	// failure so a dead relay stops being re-hammered (cap 15 min).
+	const base = status === 429 ? 90_000 : 30_000;
+	const cooldownMs = Math.min(base * 2 ** (consecutive - 1), 15 * 60_000);
+	relayHealth.set(url, {
+		consecutiveFailures: consecutive,
+		cooldownUntil: Date.now() + cooldownMs,
+	});
+	log("warn", "relay cooling down", { url, status: status ?? 0, cooldownMs });
+}
+function relayHealthy(url: string): boolean {
+	const h = relayHealth.get(url);
+	return !h || h.cooldownUntil <= Date.now();
+}
+/** Ordered relay candidates: sticky puts the active relay first; spread
+ *  round-robins healthy relays (cooling ones always last). */
+function orderedRelayCandidates(): string[] {
+	const urls = relayState.relays.map((r) => r.url).filter(Boolean);
+	const healthy = urls.filter(relayHealthy);
+	const cooling = urls.filter((u) => !relayHealthy(u));
+	const ordered =
+		relayState.rotation === "spread" && healthy.length > 1
+			? [...healthy.slice(spreadCursor % healthy.length), ...healthy.slice(0, spreadCursor % healthy.length)]
+			: healthy;
+	if (relayState.rotation === "sticky" && relayState.url) {
+		const i = ordered.indexOf(relayState.url);
+		if (i > 0) ordered.splice(i, 1), ordered.unshift(relayState.url);
+	}
+	spreadCursor++;
+	return [...ordered, ...cooling];
+}
+
 // Catalog served at GET /v1/models — ONLY the alive free models we register.
 // Set after health checks. Prevents paid/other upstream models from leaking
 // through the proxy's /v1/models (opencode returns 60 models incl. 54 paid).
 type RegisteredModel = ModelDef & { source: Upstream };
 let aliveCatalog: RegisteredModel[] = [];
 
-// Relay-aware fetch. Direct when disabled; otherwise POST to relay URL with the
-// two relay headers. Falls back to direct on relay error (non-strict).
+// Relay-aware fetch. Direct when disabled; otherwise try the relay pool in
+// health order (rolling failover on 429/5xx/socket errors) and fall back to
+// direct only when every relay failed. The response body is consumed by the
+// caller; failures are detected via status + copy of the body text.
 async function relayFetch(
 	url: string,
 	opts: RequestInit = {},
 ): Promise<Response> {
-	if (!relayState.enabled || !relayState.url) return fetch(url, opts);
-	try {
-		const u = new URL(url);
-		relayHits++;
-		const headers = new Headers(opts.headers);
-		headers.set("x-relay-target", `${u.protocol}//${u.host}`);
-		headers.set("x-relay-path", `${u.pathname}${u.search}`);
-		return await fetch(relayState.url, { ...opts, headers });
-	} catch (e) {
-		log("warn", "relay fetch failed, falling back to direct", {
-			url,
-			error: String(e),
-		});
-		return fetch(url, opts);
+	if (!relayState.enabled) return fetch(url, opts);
+	const candidates = orderedRelayCandidates();
+	if (candidates.length === 0) return fetch(url, opts);
+	const u = new URL(url);
+	let lastError: unknown = null;
+	for (const relay of candidates) {
+		try {
+			relayHits++;
+			const headers = new Headers(opts.headers);
+			headers.set("x-relay-target", `${u.protocol}//${u.host}`);
+			headers.set("x-relay-path", `${u.pathname}${u.search}`);
+			const res = await fetch(relay, { ...opts, headers });
+			if (res.ok || (res.status >= 400 && res.status < 500 && res.status !== 429 && res.status !== 408)) {
+				// Success, or a client error that is OUR payload's fault (400/401/
+				// 403/404…) — rolling to another relay would replay the same
+				// failure. 4xx-except-429/408 returns as-is.
+				markRelaySuccess(relay);
+				return res;
+			}
+			// 429/408/5xx: this egress IP is limited or the relay is unhealthy —
+			// cool it down and roll to the next candidate.
+			markRelayFailure(relay, res.status);
+			// Drain the error body so the socket is released before retrying.
+			await res.arrayBuffer().catch(() => undefined);
+			lastError = new Error(`relay ${relay} → HTTP ${res.status}`);
+		} catch (e) {
+			markRelayFailure(relay);
+			lastError = e;
+		}
 	}
+	log("warn", "all relays failed, falling back to direct", {
+		url,
+		error: String(lastError),
+	});
+	return fetch(url, opts);
 }
 
 // ── Deploy a fresh Vercel relay (same flow as 9Router) ───────────────────────
@@ -1433,7 +1513,7 @@ export default async function (pi: ExtensionAPI) {
 	// ── /bansos command: toggle relay egress live (on|off|status|url [URL]) ───
 	pi.registerCommand("bansos", {
 		description:
-			"Relay egress: on | off | status | url [URL] | deploy | list | use <URL> | remove <URL> | hide | show | refresh-models",
+			"Relay egress: on | off | status | url [URL] | deploy | list | use <URL> | remove <URL> | rotation sticky|spread | hide | show | refresh-models",
 		getArgumentCompletions: (prefix: string) =>
 			[
 				"on",
@@ -1447,6 +1527,7 @@ export default async function (pi: ExtensionAPI) {
 				"hide",
 				"show",
 				"refresh-models",
+				"rotation",
 			]
 				.filter((s) => s.startsWith(prefix))
 				.map((s) => ({ value: s, label: s })),
@@ -1614,6 +1695,22 @@ export default async function (pi: ExtensionAPI) {
 					`Model catalog refreshed: ${updated.length} known free models. Restart pi to update the model picker.`,
 					"info",
 				);
+			} else if (sub === "rotation") {
+				const mode = rest.trim();
+				if (mode === "sticky" || mode === "spread") {
+					if (commit((s) => ({ ...s, rotation: mode })))
+						ctx.ui.notify(
+							mode === "spread"
+								? "Spread rotation: each request round-robins across healthy relays (different egress IPs)."
+								: "Sticky rotation: one active relay, failover only on failure.",
+							"info",
+						);
+				} else {
+					ctx.ui.notify(
+						`Rotation mode: ${relayState.rotation} — /bansos rotation sticky|spread`,
+						"info",
+					);
+				}
 			} else if (sub === "hide") {
 				setStatusBar("hidden");
 			} else if (sub === "show") {

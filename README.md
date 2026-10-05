@@ -26,7 +26,7 @@ Free model provider for **[pi](https://pi.dev)** ([browse packages](https://pi.d
 - **Instant startup** — the model catalog is cached locally and registered without waiting on upstream; it refreshes in the background
 - **Auto health-check** — only catalog-listed models registered; dead ones skipped silently
 - **Local-only proxy** — binds to `127.0.0.1`, nothing exposed externally; one proxy per loaded extension, shared by every session that uses it (including OMP's in-process subagents)
-- **Optional relay egress** — route through a Vercel/Cloudflare relay to dodge per-IP rate limits, toggled live via `/bansos`
+- **Optional relay egress with pool rotation** — route through your relay pool (Vercel/Cloudflare/Deno) to dodge per-IP rate limits; rolling failover with escalating cooldowns on 429/5xx, sticky or spread (round-robin) rotation, direct fallback when the whole pool cools down — toggled live via `/bansos`
 - **Auto port bump** — if port 18080 is taken, automatically tries the next one (up to 18100)
 
 ## Models
@@ -166,6 +166,7 @@ Run `/bansos` any time:
 | `/bansos list`                | Show all saved relays (★ = active)                                           |
 | `/bansos remove <URL>`        | Forget a saved relay (the active one can't be removed)                       |
 | `/bansos deploy`              | **Deploy a fresh Vercel relay** and switch to it                             |
+| `/bansos rotation sticky\|spread` | Egress rotation: sticky = one active relay, spread = round-robin per request |
 | `/bansos hide` / `/bansos show` | Hide or show the `bansos` status-bar entry (default: shown)                |
 | `/bansos refresh-models`      | Force a model-catalog re-fetch (warns when it fails; list may be stale)      |
 
