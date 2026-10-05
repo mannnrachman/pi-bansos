@@ -1,5 +1,17 @@
 # Changelog
 
+## Unreleased
+
+### Added
+- OpenCode `fledge-alpha-free` and `longcat-2.5-preview-free` — catalog IN, chat 200 via the proxy (specs conservative: upstream publishes none; `space-bunny-free`-class reasoning models).
+- Kilo `apodex/apodex-1.1-mini:free` — reasoning-first research/forecasting mini (262K ctx / 236K out, text-only, `reasoning` field verified live).
+
+### Removed
+- Kilo `inclusionai/ling-3.0-flash-fin:free` — gone from the live catalog (replaced by the OpenCode-side `ling-3.0-flash-fin-free`, which stays).
+
+### Rejected after live testing (2026-10-05)
+- OpenCode `jev-1.13-free` (500 upstream), `ling-3.1-flash-free` (403 FreeTierError via proxy), `deepseek-v4-flash-free` (400 Model is unavailable). Will re-test next catalog sweep.
+
 ## [0.4.13] - 2026-09-28
 
 Everything from the Sept-28 working session: issues #5/#6/#7 (PRs #8/#9), the KiloCode 401 fix, catalog sync, per-host state files, and this README/CHANGELOG cleanup.

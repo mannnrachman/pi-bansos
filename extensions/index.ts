@@ -427,7 +427,10 @@ interface ModelDef {
 }
 
 // OpenCode Zen free models verified against the live catalog and inference APIs.
-// Last verified: 2026-09-28 — added space-bunny-free (catalog IN, chat 200).
+// Last verified: 2026-10-05 — added fledge-alpha-free, longcat-2.5-preview-free
+// (both catalog IN, chat 200 via proxy; specs conservative — upstream publishes
+// none). jev-1.13-free (500), ling-3.1-flash-free (403), deepseek-v4-flash-free
+// (400) rejected live.
 const KNOWN_MODELS: ModelDef[] = [
 	{
 		id: "muse-spark-1.3-contributor-free",
@@ -517,10 +520,24 @@ const KNOWN_MODELS: ModelDef[] = [
 		maxTokens: 524_288,
 		input: ["text", "image"],
 	},
+	{
+		id: "fledge-alpha-free",
+		name: "Fledge Alpha",
+		reasoning: true,
+		contextWindow: 200_000,
+		maxTokens: 65_536,
+	},
+	{
+		id: "longcat-2.5-preview-free",
+		name: "LongCat 2.5 Preview",
+		reasoning: true,
+		contextWindow: 1_000_000,
+		maxTokens: 131_072,
+	},
 ];
 
 // KiloCode gateway free models (keyless — https://kilo.ai/docs/gateway).
-// Specs match the live catalog fetched on 2026-09-28.
+// Specs match the live catalog fetched on 2026-10-05.
 const KILO_MODELS: ModelDef[] = [
 	{
 		id: "kilo-auto/free",
@@ -622,11 +639,11 @@ const KILO_MODELS: ModelDef[] = [
 		thinkingFormat: "openrouter",
 	},
 	{
-		id: "inclusionai/ling-3.0-flash-fin:free",
-		name: "Ling 3.0 Flash Fin Free",
+		id: "apodex/apodex-1.1-mini:free",
+		name: "Apodex 1.1 Mini Free",
 		reasoning: true,
 		contextWindow: 262_144,
-		maxTokens: 32_768,
+		maxTokens: 235_929,
 		thinkingFormat: "openrouter",
 	},
 	{

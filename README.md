@@ -22,7 +22,7 @@ Free model provider for **[pi](https://pi.dev)** ([browse packages](https://pi.d
 ## Features
 
 - **Zero cost** — all models free, no API key needed for supported upstreams
-- **26 models from 2 sources** — 9 OpenCode Zen + 17 KiloCode gateway
+- **28 models from 2 sources** — 11 OpenCode Zen + 17 KiloCode gateway
 - **Instant startup** — the model catalog is cached locally and registered without waiting on upstream; it refreshes in the background
 - **Auto health-check** — only catalog-listed models registered; dead ones skipped silently
 - **Local-only proxy** — binds to `127.0.0.1`, nothing exposed externally; one proxy per loaded extension, shared by every session that uses it (including OMP's in-process subagents)
@@ -31,9 +31,9 @@ Free model provider for **[pi](https://pi.dev)** ([browse packages](https://pi.d
 
 ## Models
 
-**26 total: 9 OpenCode + 17 KiloCode.** All models are free. The provider is one `bansos` entry, but model names show their upstream: **OpenCode** or **KiloCode**. The startup check only verifies catalog membership; upstream access can still change between startup and a request.
+**28 total: 11 OpenCode + 17 KiloCode.** All models are free. The provider is one `bansos` entry, but model names show their upstream: **OpenCode** or **KiloCode**. The startup check only verifies catalog membership; upstream access can still change between startup and a request.
 
-### OpenCode Zen (9 models)
+### OpenCode Zen (11 models)
 
 | Model ID                          | Name                        | Vision | API       | Context     | Max Output  | Reasoning |
 | --------------------------------- | --------------------------- | ------ | --------- | ----------- | ----------- | --------- |
@@ -42,6 +42,8 @@ Free model provider for **[pi](https://pi.dev)** ([browse packages](https://pi.d
 | `mimo-v2.5-free`                  | MiMo V2.5 Free              | ✅      | chat      | 200K tokens | 32K tokens  | ✅         |
 | `mimo-v2.6-flash-free`            | MiMo V2.6 Flash Free        | ✅      | chat      | 200K tokens | 32K tokens  | ✅         |
 | `space-bunny-free`                | Space Bunny                 | ✅      | chat      | 1M tokens   | 524K tokens | ✅         |
+| `fledge-alpha-free`               | Fledge Alpha                | ❌      | chat      | 200K tokens | 65K tokens  | ✅         |
+| `longcat-2.5-preview-free`        | LongCat 2.5 Preview         | ❌      | chat      | 1M tokens   | 131K tokens | ✅         |
 | `ling-3.0-flash-fin-free`         | Ling 3.0 Flash Fin Free     | ❌      | chat      | 262K tokens | 32K tokens  | ✅         |
 | `nemotron-3-ultra-free`           | Nemotron 3 Ultra Free       | ❌      | chat      | 1M tokens   | 128K tokens | ✅         |
 | `nemotron-3.5-lightning-free`     | Nemotron 3.5 Lightning Free | ❌      | chat      | 262K tokens | 262K tokens | ✅         |
@@ -69,11 +71,11 @@ Keyless — 200 requests/hour per IP. No `Authorization` header is sent; the fre
 | `nvidia/nemotron-3.5-lightning:free`                 | Nemotron 3.5 Lightning Free      | ❌      | 1M tokens   | 65K tokens  | ✅         |
 | `nvidia/nemotron-3.5-content-safety:free`            | Nemotron 3.5 Content Safety Free | ✅      | 128K tokens | 8K tokens   | ✅         |
 | `inclusionai/ling-3.0-flash-sante:free`              | Ling 3.0 Flash Sante Free        | ❌      | 262K tokens | 32K tokens  | ✅         |
-| `inclusionai/ling-3.0-flash-fin:free`                | Ling 3.0 Flash Fin Free          | ❌      | 262K tokens | 32K tokens  | ✅         |
 | `liquid/lfm-2.5-2.6b:free`                           | Liquid LFM 2.5 2.6B Free         | ❌      | 65K tokens  | 8K tokens   | ✅         |
 | `poolside/laguna-s-2.1:free`                         | Laguna S 2.1 Free                | ❌      | 262K tokens | 32K tokens  | ✅         |
 | `thinkingmachines/inkling-small:free`                | Inkling Small Free               | ✅      | 1M tokens   | 262K tokens | ✅         |
 | `qwen/qwen3.8-27b:free`                              | Qwen3.8 27B Free                 | ✅      | 262K tokens | 236K tokens | ✅         |
+| `apodex/apodex-1.1-mini:free`                        | Apodex 1.1 Mini Free             | ❌      | 262K tokens | 236K tokens | ✅         |
 
 `openrouter/free` is **pinned**: it no longer appears in the `/models` catalog, but chat completions still serve it — so it stays registered.
 
