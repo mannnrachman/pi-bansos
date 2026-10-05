@@ -25,7 +25,7 @@ const API = `${UPSTREAM_OPENCODE}/v1`;
 
 // OpenCode Zen free-tier client fingerprint (verified live 2026-09-18; same
 // gates as 9router PR #4132). Missing any one → 403 FreeTierError.
-// UA version tracks the live opencode-ai npm release (pi-freeflow pattern):
+// UA version tracks the live opencode-ai npm release:
 // env override > live version > disk cache > pinned fallback. The gate has
 // rejected stale UA versions before; auto-refresh keeps us off that cliff.
 const OPENCODE_UA_FALLBACK = "1.18.31";
@@ -33,7 +33,7 @@ const OPENCODE_UA_VERSION_RE = /^\d+\.\d+\.\d+$/;
 const OPENCODE_USER_AGENT_ENV = "BANSOS_OPENCODE_UA";
 const BASE62 =
 	"0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz";
-// Gate requires the bash+read pair at minimum (bisect 2026-10-05); freeflow
+// Gate requires the bash+read pair at minimum (bisect 2026-10-05);
 // ships the full sextet {bash,glob,grep,read,edit,write} — match it.
 const OPENCODE_FINGERPRINT_TOOLS = [
 	"bash",
@@ -44,7 +44,7 @@ const OPENCODE_FINGERPRINT_TOOLS = [
 	"write",
 ] as const;
 // Project id: zen clients send a 40-char hex project hash (9router #4111,
-// bansos-router). A bare "global" still passes today but hex is the shape
+// a bare "global" still passes today but hex is the shape
 // real clients emit — cheap insurance against a stricter gate.
 const OPENCODE_PROJECT_ID = randomBytes(20).toString("hex");
 const OPENCODE_SESSION_RE = /^ses_[0-9a-f]{12}[0-9A-Za-z]{14}$/;
@@ -110,7 +110,7 @@ function uaVersionCacheFile(): string | null {
 	}
 }
 /** Fire-and-forget: track the live opencode-ai npm version so the gate never
- *  sees a stale UA. Failure keeps the pinned fallback (pi-freeflow pattern). */
+ *  sees a stale UA. Failure keeps the pinned fallback. */
 async function refreshOpenCodeUA(): Promise<void> {
 	if (process.env[OPENCODE_USER_AGENT_ENV]?.trim()) return;
 	try {
@@ -148,7 +148,7 @@ function opencodeHeaders(): Record<string, string> {
 		"x-opencode-session": OPENCODE_SESSION,
 		"x-session-affinity": OPENCODE_SESSION,
 		"x-opencode-request": generateRequestId(),
-		// Distributed-tracing headers real opencode clients emit (bansos-router).
+		// Distributed-tracing headers real opencode clients emit.
 		b3: `${traceId}-${spanId}-1-${spanId}`,
 		traceparent: `00-${traceId}-${spanId}-01`,
 		Accept: "text/event-stream",
@@ -191,7 +191,7 @@ function ensureChatFingerprintTools(body: Record<string, unknown>): void {
 		});
 		injected = true;
 	}
-	// Injected decoys must never be callable (bansos-router): the model would
+	// Injected decoys must never be callable: the model would
 	// burn the reply calling tools that don't exist downstream. "none" hides
 	// every injected name; caller-declared tools stay callable because pi
 	// always sends an explicit tool list alongside.
@@ -366,7 +366,7 @@ function resolveRelayState(): RelayState {
 let relayState: RelayState = resolveRelayState();
 let relayHits = 0;
 
-// ── Relay pool health & failover (pi-freeflow / llm-keypool patterns) ───────
+// ── Relay pool health & failover ───────
 // A relay that 429s is out of quota for now. Vercel relays share one NAT
 // egress pool, so extra relays do NOT add IP diversity — the value here is
 // failover (roll to another relay / direct) and not hammering a dead one.
@@ -1490,7 +1490,7 @@ export default async function (pi: ExtensionAPI) {
 			log("warn", "model catalog refresh failed", { error: String(error) }),
 		);
 	}
-	// Keep the gate UA fresh without blocking startup (pi-freeflow pattern).
+	// Keep the gate UA fresh without blocking startup.
 	void refreshOpenCodeUA().catch(() => undefined);
 
 	// ── /bansos command: toggle relay egress live (on|off|status|url [URL]) ───
