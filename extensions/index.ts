@@ -568,11 +568,12 @@ interface ModelDef {
 }
 
 // OpenCode Zen free models verified against the live catalog and inference APIs.
-// Last verified: 2026-10-05 — added ling-3.1-flash-free, fledge-alpha-free,
-// longcat-2.5-preview-free (catalog IN, chat 200 via proxy; specs conservative
-// — upstream publishes none). Free-tier gate requires bash+read tool pair in
-// the payload (verified by bisect; the 4-tool fingerprint satisfies it).
-// jev-1.13-free (500 upstream), deepseek-v4-flash-free (400) rejected live.
+// Last verified: 2026-10-09 — added step-5-preview-free (catalog IN, chat 200
+// via proxy; upstream flaky, occasionally 502 "Endpoint is unavailable").
+// Dropped: fledge-alpha-free, mimo-v2.5-free (upstream "Model not supported").
+// Free-tier gate requires bash+read tool pair in the payload (verified by
+// bisect; the fingerprint satisfies it). exo-free (410 deprecated),
+// jev-1.13-free (protocol unsupported), deepseek-v4-flash-free (400) rejected live.
 const KNOWN_MODELS: ModelDef[] = [
 	{
 		id: "muse-spark-1.3-contributor-free",
@@ -611,12 +612,11 @@ const KNOWN_MODELS: ModelDef[] = [
 		},
 	},
 	{
-		id: "mimo-v2.5-free",
-		name: "MiMo V2.5 Free",
+		id: "step-5-preview-free",
+		name: "Step 5 Preview Free",
 		reasoning: true,
-		contextWindow: 200_000,
-		maxTokens: 32_000,
-		input: ["text", "image"],
+		contextWindow: 262_144,
+		maxTokens: 65_536,
 	},
 	{
 		id: "mimo-v2.6-flash-free",
@@ -670,13 +670,6 @@ const KNOWN_MODELS: ModelDef[] = [
 		maxTokens: 32_768,
 	},
 	{
-		id: "fledge-alpha-free",
-		name: "Fledge Alpha",
-		reasoning: true,
-		contextWindow: 200_000,
-		maxTokens: 65_536,
-	},
-	{
 		id: "longcat-2.5-preview-free",
 		name: "LongCat 2.5 Preview",
 		reasoning: true,
@@ -694,15 +687,6 @@ const KILO_MODELS: ModelDef[] = [
 		reasoning: false,
 		contextWindow: 256_000,
 		maxTokens: 10_000,
-	},
-	{
-		id: "stepfun/step-3.7-flash:free",
-		name: "Step 3.7 Flash Free",
-		reasoning: true,
-		contextWindow: 262_144,
-		maxTokens: 262_144,
-		input: ["text", "image"],
-		thinkingFormat: "openrouter",
 	},
 	{
 		id: "nvidia/nemotron-3-ultra-550b-a55b:free",
@@ -780,22 +764,6 @@ const KILO_MODELS: ModelDef[] = [
 		thinkingFormat: "openrouter",
 	},
 	{
-		id: "inclusionai/ling-3.0-flash-sante:free",
-		name: "Ling 3.0 Flash Sante Free",
-		reasoning: true,
-		contextWindow: 262_144,
-		maxTokens: 32_768,
-		thinkingFormat: "openrouter",
-	},
-	{
-		id: "apodex/apodex-1.1-mini:free",
-		name: "Apodex 1.1 Mini Free",
-		reasoning: true,
-		contextWindow: 262_144,
-		maxTokens: 235_929,
-		thinkingFormat: "openrouter",
-	},
-	{
 		id: "liquid/lfm-2.5-2.6b:free",
 		name: "Liquid LFM 2.5 2.6B Free",
 		reasoning: true,
@@ -817,15 +785,6 @@ const KILO_MODELS: ModelDef[] = [
 		reasoning: true,
 		contextWindow: 1_048_576,
 		maxTokens: 262_144,
-		input: ["text", "image"],
-		thinkingFormat: "openrouter",
-	},
-	{
-		id: "qwen/qwen3.8-27b:free",
-		name: "Qwen3.8 27B Free",
-		reasoning: true,
-		contextWindow: 262_144,
-		maxTokens: 235_929,
 		input: ["text", "image"],
 		thinkingFormat: "openrouter",
 	},

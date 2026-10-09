@@ -1,5 +1,20 @@
 # Changelog
 
+## [0.4.15] - 2026-10-09
+
+Session log: full catalog sweep of both gateways (live `/models` diff + per-model inference verification through the proxy), then 5 drops and 1 addition.
+
+### Added
+- OpenCode `step-5-preview-free` — new in the live catalog, chat 200 via the proxy (62–67 reasoning tokens per reply, SSE pass-through clean). Upstream is flaky: intermittent 502 "Endpoint is unavailable" between healthy calls, so expect occasional retries.
+
+### Removed
+- Kilo `stepfun/step-3.7-flash:free`, `inclusionai/ling-3.0-flash-sante:free`, `qwen/qwen3.8-27b:free`, `apodex/apodex-1.1-mini:free` — gone from the live gateway catalog (exact-id 404 / "model does not exist").
+- OpenCode `fledge-alpha-free`, `mimo-v2.5-free` — still in the upstream catalog but inference-rejected ("Model not supported"); dead weight, dropped.
+
+### Rejected after live testing (2026-10-09)
+- OpenCode `exo-free` (410 deprecated), `jev-1.13-free` (ModelProtocolUnsupported).
+- Kilo transient 429s (`poolside/laguna-*`, `thinkingmachines/inkling-small`) and Nvidia 5xx/ResourceExhausted spikes are rate-limit noise, not model death — all stay registered.
+
 ## [0.4.14] - 2026-10-05
 
 Session log: catalog sweep 2026-10-05 (4 new models, 1 dead), zen free-tier gate root-caused and fingerprint hardened, and relay failover added.
