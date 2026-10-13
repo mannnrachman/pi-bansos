@@ -2,15 +2,9 @@
 
 ## [0.5.0] - 2026-10-13
 
-Session log: investigated the wave of `403 FreeTierError` reports after OpenCode's 1.19.0 gate update, root-caused it against upstream sources, and hardened the ID generation to match opencode byte-for-byte. Minor-version bump: the fingerprint layer has grown a lot of live-tested logic (UA auto-tracking, hex project id, sextet tool gate, ID timestamp encoding) — 0.5 marks that maturity.
-
 ### Fixed
 - **OpenCode free-tier 403 wave (gate 1.19.0)**: upstream now validates the embedded timestamp inside the `ses_`/`msg_` ID prefixes (root cause per 9router PRs #4782/#4786/#4787 — non-OpenCode clients sending SHA-256-derived or static prefixes get classified as non-OpenCode traffic). Our generation was already structurally correct; it is now a **verified bit-exact port** of `Identifier.create()` (`packages/schema/src/identifier.ts` @ 1.19.0): sessions = `Identifier.descending` (`~(ts*4096+counter)`), messages = `Identifier.ascending` (`ts*4096+1`), prefix = low 48 bits as 12-hex. Verified bitwise-equal to upstream across 500 timestamp samples; live e2e: 6/6 OpenCode models 200 through the proxy (ling-3.1/step-5 remain upstream-flaky, unrelated).
 - Gate fingerprint elements confirmed still required and present: UA tracking the live release (now `1.19.0`), 40-hex project id, `bash`+`read` tool pair, `x-opencode-client: desktop`, streaming payloads.
-
-## [0.4.16] - 2026-10-13
-
-Superseded by 0.5.0 (same content; version bumped before the npm publish so the release lands on the minor bump directly).
 
 ## [0.4.15] - 2026-10-09
 
