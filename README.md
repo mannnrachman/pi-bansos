@@ -22,46 +22,47 @@ Free model provider for **[pi](https://pi.dev)** ([browse packages](https://pi.d
 ## Features
 
 - **Zero cost** — all models free, no API key needed for supported upstreams
-- **29 models from 2 sources** — 12 OpenCode Zen + 17 KiloCode gateway
+- **24 models from 2 sources** — 11 OpenCode Zen + 13 KiloCode gateway
 - **Instant startup** — the model catalog is cached locally and registered without waiting on upstream; it refreshes in the background
 - **Auto health-check** — only catalog-listed models registered; dead ones skipped silently
 - **Local-only proxy** — binds to `127.0.0.1`, nothing exposed externally; one proxy per loaded extension, shared by every session that uses it (including OMP's in-process subagents)
 - **Optional relay egress with automatic failover** — route through a Vercel relay to dodge per-IP rate limits; a 429/unreachable relay cools down (escalating backoff) and the request rolls to the next healthy relay or goes direct — toggled live via `/bansos`
+- **OpenCode free-tier fingerprint kept current** — auto-tracks the live `opencode-ai` UA version, generates spec-correct session/request IDs (verified against opencode's own `Identifier`), and ships the tool-pair payload the 1.19.0 gate expects
 - **Auto port bump** — if port 18080 is taken, automatically tries the next one (up to 18100)
 
 ## Models
 
-**29 total: 12 OpenCode + 17 KiloCode.** All models are free. The provider is one `bansos` entry, but model names show their upstream: **OpenCode** or **KiloCode**. The startup check only verifies catalog membership; upstream access can still change between startup and a request.
+**24 total: 11 OpenCode + 13 KiloCode.** All models are free. The provider is one `bansos` entry, but model names show their upstream: **OpenCode** or **KiloCode**. The startup check only verifies catalog membership; upstream access can still change between startup and a request.
 
-### OpenCode Zen (12 models)
+### OpenCode Zen (11 models)
 
 | Model ID                          | Name                        | Vision | API       | Context     | Max Output  | Reasoning |
 | --------------------------------- | --------------------------- | ------ | --------- | ----------- | ----------- | --------- |
 | `muse-spark-1.3-contributor-free` | Muse Spark 1.3 Free         | ✅      | responses | 1M tokens   | 131K tokens | ✅         |
 | `muse-spark-1.2-contributor-free` | Muse Spark 1.2 Free         | ✅      | responses | 1M tokens   | 131K tokens | ✅         |
-| `mimo-v2.5-free`                  | MiMo V2.5 Free              | ✅      | chat      | 200K tokens | 32K tokens  | ✅         |
+| `step-5-preview-free`             | Step 5 Preview Free         | ❌      | chat      | 262K tokens | 65K tokens  | ✅         |
 | `mimo-v2.6-flash-free`            | MiMo V2.6 Flash Free        | ✅      | chat      | 200K tokens | 32K tokens  | ✅         |
 | `space-bunny-free`                | Space Bunny                 | ✅      | chat      | 1M tokens   | 524K tokens | ✅         |
 | `ling-3.1-flash-free`             | Ling 3.1 Flash Free         | ❌      | chat      | 262K tokens | 32K tokens  | ✅         |
-| `fledge-alpha-free`               | Fledge Alpha                | ❌      | chat      | 200K tokens | 65K tokens  | ✅         |
 | `longcat-2.5-preview-free`        | LongCat 2.5 Preview         | ❌      | chat      | 1M tokens   | 131K tokens | ✅         |
 | `ling-3.0-flash-fin-free`         | Ling 3.0 Flash Fin Free     | ❌      | chat      | 262K tokens | 32K tokens  | ✅         |
 | `nemotron-3-ultra-free`           | Nemotron 3 Ultra Free       | ❌      | chat      | 1M tokens   | 128K tokens | ✅         |
 | `nemotron-3.5-lightning-free`     | Nemotron 3.5 Lightning Free | ❌      | chat      | 262K tokens | 262K tokens | ✅         |
 | `big-pickle`                      | Big Pickle                  | ❌      | chat      | 200K tokens | 32K tokens  | ✅         |
 
+`step-5-preview-free` is upstream-flaky: occasional 502 "Endpoint is unavailable" between healthy calls — retry.
+
 **Muse note:** Muse uses OpenAI Responses (`/v1/responses`), while the other OpenCode models use Chat Completions (`/v1/chat/completions`). pi-bansos selects the API per model and suppresses Muse's unsupported `reasoning.effort: "none"` value when reasoning is off.
 
 Manual check: select `OpenCode · Muse Spark 1.3 Free` in `/model`, then ask it to `Reply with exactly OK.`
 
-### KiloCode Gateway (17 models)
+### KiloCode Gateway (13 models)
 
 Keyless — 200 requests/hour per IP. No `Authorization` header is sent; the free gateway rejects placeholder tokens.
 
 | Model ID                                             | Name                             | Vision | Context     | Max Output  | Reasoning |
 | ---------------------------------------------------- | -------------------------------- | ------ | ----------- | ----------- | --------- |
 | `kilo-auto/free`                                     | Kilo Auto Free                   | ❌      | 256K tokens | 10K tokens  | ❌         |
-| `stepfun/step-3.7-flash:free`                        | Step 3.7 Flash Free              | ✅      | 262K tokens | 262K tokens | ✅         |
 | `nvidia/nemotron-3-ultra-550b-a55b:free`             | Nemotron 3 Ultra Free            | ❌      | 1M tokens   | 65K tokens  | ✅         |
 | `nvidia/nemotron-3-super-120b-a12b:free`             | Nemotron 3 Super Free            | ❌      | 262K tokens | 236K tokens | ✅         |
 | `dots-studio/dots-3-note-preview:free`               | Dots3-Note Preview Free          | ✅      | 512K tokens | 460K tokens | ✅         |
@@ -71,12 +72,9 @@ Keyless — 200 requests/hour per IP. No `Authorization` header is sent; the fre
 | `openrouter/free`                                    | OpenRouter Free (auto)           | ✅      | 200K tokens | 65K tokens  | ❌         |
 | `nvidia/nemotron-3.5-lightning:free`                 | Nemotron 3.5 Lightning Free      | ❌      | 1M tokens   | 65K tokens  | ✅         |
 | `nvidia/nemotron-3.5-content-safety:free`            | Nemotron 3.5 Content Safety Free | ✅      | 128K tokens | 8K tokens   | ✅         |
-| `inclusionai/ling-3.0-flash-sante:free`              | Ling 3.0 Flash Sante Free        | ❌      | 262K tokens | 32K tokens  | ✅         |
 | `liquid/lfm-2.5-2.6b:free`                           | Liquid LFM 2.5 2.6B Free         | ❌      | 65K tokens  | 8K tokens   | ✅         |
 | `poolside/laguna-s-2.1:free`                         | Laguna S 2.1 Free                | ❌      | 262K tokens | 32K tokens  | ✅         |
 | `thinkingmachines/inkling-small:free`                | Inkling Small Free               | ✅      | 1M tokens   | 262K tokens | ✅         |
-| `qwen/qwen3.8-27b:free`                              | Qwen3.8 27B Free                 | ✅      | 262K tokens | 236K tokens | ✅         |
-| `apodex/apodex-1.1-mini:free`                        | Apodex 1.1 Mini Free             | ❌      | 262K tokens | 236K tokens | ✅         |
 
 `openrouter/free` is **pinned**: it no longer appears in the `/models` catalog, but chat completions still serve it — so it stays registered.
 
