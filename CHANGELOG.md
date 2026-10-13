@@ -1,5 +1,10 @@
 # Changelog
 
+## [0.5.1] - 2026-10-13
+
+### Fixed
+- README model tables synced to the actual 0.5.0 catalog (24 models: 11 OpenCode + 13 KiloCode) — the published 0.5.0 README still showed the old 29-model tables.
+
 ## [0.5.0] - 2026-10-13
 
 ### Fixed
