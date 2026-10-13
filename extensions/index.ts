@@ -63,9 +63,16 @@ function unstableRandom(): string {
 	return out;
 }
 
+// Bit-exact port of opencode's Identifier.create() (packages/schema/src/
+// identifier.ts, verified 1.19.0): value = descending ? ~(ts*4096+counter)
+// : ts*4096+counter; prefix = low 48 bits as 12-hex. The mask here is
+// equivalent to upstream's byte-slicing of the (possibly negative) bigint.
+const OPENCODE_ID_MASK = (1n << 48n) - 1n;
+
 function timeHexFrom(value: bigint): string {
+	const v = value & OPENCODE_ID_MASK;
 	return Array.from({ length: 6 }, (_, i) =>
-		Number((value >> BigInt(40 - 8 * i)) & 0xffn)
+		Number((v >> BigInt(40 - 8 * i)) & 0xffn)
 			.toString(16)
 			.padStart(2, "0"),
 	).join("");
@@ -77,11 +84,13 @@ function generateSessionId(timestamp = Date.now()): string {
 		sessionCounter = 0;
 	}
 	sessionCounter++;
+	// Identifier.descending("session")
 	const current = BigInt(timestamp) * 0x1000n + BigInt(sessionCounter);
 	return `ses_${timeHexFrom(~current)}${unstableRandom()}`;
 }
 
 function generateRequestId(timestamp = Date.now()): string {
+	// Identifier.ascending("message")
 	const current = BigInt(timestamp) * 0x1000n + 1n;
 	return `msg_${timeHexFrom(current)}${unstableRandom()}`;
 }
