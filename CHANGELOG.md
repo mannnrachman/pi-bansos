@@ -1,5 +1,15 @@
 # Changelog
 
+## [0.6.0] - 2026-10-15
+
+### Fixed
+- **OpenCode free-tier 403 wave #2 (v2 gate, 2026-10-14)**: upstream moved the free tier off `/zen/v1` — every free request there now 403s (`FreeTierError`), matching 9router PR #4842. Live-bisected the new gate and ported the extension to it:
+  - Endpoint: inbound `/v1/*` is rewritten to `/inference/v1/*`; muse-class (Responses) models route to `/inference/v1/responses`. `/zen/v1/models` still answers and remains the catalog source.
+  - Headers: `x-opencode-session-id` must now accompany `x-opencode-session` (both, equal); `x-opencode-request` is **rejected** and no longer sent on the inference surface.
+  - Tools: the gate now requires opencode's own `read` + `shell` with exact descriptions and parameters schemas (embedded verbatim from `packages/core/src/tool/plugin/{read,shell}.ts`); stub descriptions fail. Caller tools whose names collide with real opencode tools (`bash`, `glob`, `grep`, `edit`, `write`, …) are aliased `*_pi` on the wire and restored in the response (stream + non-stream).
+  - `tool_choice` is no longer force-set to `"none"`.
+- Verified live: 7/9 OpenCode chat models 200 through the proxy with colliding caller tools, both muse models 200 on the responses surface, real `pi -p` end-to-end OK. `ling-3.1/3.0-flash-fin-free` remain upstream-side unavailable (400 "Model is unavailable", not gate).
+
 ## [0.5.1] - 2026-10-13
 
 ### Fixed
