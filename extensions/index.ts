@@ -14,14 +14,18 @@ import { fileURLToPath } from "node:url";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 
 // ── Configuration ──────────────────────────────────────────────────
-const UPSTREAM_OPENCODE = "https://opencode.ai/zen";
+const UPSTREAM_OPENCODE = "https://opencode.ai";
+// OpenCode moved the free tier off /zen/v1 (gate 2026-10-14, 1.19.0+):
+// /zen/v1/* now 403s every free request. /inference/v1 is the live surface.
+// /zen/v1/models still answers 200 and stays our catalog source.
+const UPSTREAM_OPENCODE_INFERENCE = "https://opencode.ai/inference/v1";
 // KiloCode gateway — OpenAI-compatible; free models are keyless (200 req/hr per IP)
 const KILO_CHAT_URL = "https://api.kilo.ai/api/gateway/chat/completions";
 const PORT = Number(process.env.BANSOS_PORT) || 18080;
 // Startup health lines go to stderr and bury `pi -p` output. Quiet unless asked.
 const BANSOS_DEBUG = process.env.BANSOS_DEBUG === "1";
 const HOST = "127.0.0.1";
-const API = `${UPSTREAM_OPENCODE}/v1`;
+const API = "https://opencode.ai/zen/v1"; // models catalog only — chat moved to /inference/v1
 
 // OpenCode Zen free-tier client fingerprint (verified live 2026-09-18).
 // Missing any one → 403 FreeTierError.
@@ -33,16 +37,56 @@ const OPENCODE_UA_VERSION_RE = /^\d+\.\d+\.\d+$/;
 const OPENCODE_USER_AGENT_ENV = "BANSOS_OPENCODE_UA";
 const BASE62 =
 	"0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz";
-// Gate requires the bash+read pair at minimum (bisect 2026-10-05);
-// ships the full sextet {bash,glob,grep,read,edit,write} — match it.
-const OPENCODE_FINGERPRINT_TOOLS = [
-	"bash",
-	"glob",
-	"grep",
-	"read",
-	"edit",
-	"write",
+// v2 gate (2026-10-14, live-bisected): the payload must carry opencode's own
+// `read` + `shell` tools with EXACT description and parameters schema (source:
+// opencode packages/core/src/tool/plugin/{read,shell}.ts @ dev). Stub
+// descriptions or partial schemas → 403. Extra caller tools are fine EXCEPT
+// when their name collides with a real opencode tool (bash/glob/grep/edit/
+// write/patch/webfetch/…) — those get aliased with a `_pi` suffix on the wire.
+const OPENCODE_EXACT_TOOLS = [
+	{
+		type: "function",
+		function: {
+			name: "read",
+			description:
+				"Read the contents of a file or directory. Supports text files, images, and PDFs. Images and PDFs are presented directly to the model. Each text line is prefixed by its 1-based line number as <line>: <content>. The prefix is for reference and is not part of the file content. Directory entries are returned one per line. Use offset and limit to read large files or directories in sections. Prefer one larger read over many small slices, and use grep to find specific content in large files.",
+			parameters: {
+				type: "object",
+				properties: {
+					path: { type: "string", description: "File or directory to read" },
+					offset: { type: "number", description: "The line or directory entry to start reading from (1-based)" },
+					limit: { type: "number", description: "The maximum number of lines or directory entries to read (defaults to and capped at 2000)" },
+				},
+				required: ["path"],
+			},
+		},
+	},
+	{
+		type: "function",
+		function: {
+			name: "shell",
+			description:
+				"Execute a shell command and return its output. Quote file paths containing spaces or special characters. Prefer dedicated tools over shell commands when possible. When output is large, the full result is saved to a file and a truncated preview is returned. Rely on automatic truncation unless filtering the output is more useful. Commands accept an optional timeout, background commands have no timeout by default. Background commands return immediately, and you will be notified when they complete.",
+			parameters: {
+				type: "object",
+				properties: {
+					command: { type: "string", description: "Shell command string to execute" },
+					workdir: { type: "string", description: "Working directory to execute the command in. Defaults to the current working directory. When possible, avoid changing directories in the command and set the working directory here instead." },
+					timeout: { type: "number", description: "Timeout in milliseconds. Set to 0 to disable the timeout." },
+					background: { type: "boolean", description: "Run the command in the background and return immediately (useful for dev servers and long-running builds). You do not need to use '&' at the end of the command when using this parameter. You will be notified when it completes. DO NOT poll for completion." },
+				},
+				required: ["command"],
+			},
+		},
+	},
 ] as const;
+// Real opencode tool names — a caller tool with one of these names would
+// shadow/break the gate check, so it travels under an alias instead.
+const OPENCODE_TOOL_NAMES = new Set([
+	"read", "shell", "bash", "glob", "grep", "edit", "write", "patch",
+	"webfetch", "websearch", "question", "skill", "subagent", "todowrite",
+	"mcp-resource", "opencode",
+]);
 // Project id: zen clients send a 40-char hex project hash; a bare "global"
 // still passes today but hex is the shape real clients emit — cheap
 // insurance against a stricter gate.
@@ -146,22 +190,28 @@ async function refreshOpenCodeUA(): Promise<void> {
 	}
 }
 
-function opencodeHeaders(): Record<string, string> {
+function opencodeHeaders(withRequestHeader = false): Record<string, string> {
 	const traceId = randomBytes(16).toString("hex");
 	const spanId = randomBytes(8).toString("hex");
-	return {
+	const headers: Record<string, string> = {
 		"User-Agent": getOpenCodeUA(),
 		Authorization: "Bearer public",
 		"x-opencode-client": "desktop",
 		"x-opencode-project": OPENCODE_PROJECT_ID,
 		"x-opencode-session": OPENCODE_SESSION,
+		// v2 gate (2026-10-14): BOTH session headers must be present and equal.
+		"x-opencode-session-id": OPENCODE_SESSION,
 		"x-session-affinity": OPENCODE_SESSION,
-		"x-opencode-request": generateRequestId(),
 		// Distributed-tracing headers real opencode clients emit.
 		b3: `${traceId}-${spanId}-1-${spanId}`,
 		traceparent: `00-${traceId}-${spanId}-01`,
 		Accept: "text/event-stream",
 	};
+	// v2 gate REJECTS any x-opencode-request value — only sent when a caller
+	// explicitly opts in (currently nothing does; kept for catalog calls that
+	// still hit the v1 surface).
+	if (withRequestHeader) headers["x-opencode-request"] = generateRequestId();
+	return headers;
 }
 
 function toolNameOf(tool: unknown): string {
@@ -181,30 +231,37 @@ function toolNameOf(tool: unknown): string {
 }
 
 function ensureChatFingerprintTools(body: Record<string, unknown>): void {
-	const present = new Set<string>();
 	if (!Array.isArray(body.tools)) body.tools = [];
+	// 1) Alias caller tools whose names collide with real opencode tools —
+	// the v2 gate 403s a payload carrying e.g. `bash` next to the exact pair.
+	// `*_pi` on the wire; model replies referencing `bash_pi` are mapped back
+	// in the response path (stripResponseAliases).
+	const wireToCaller = new Map<string, string>();
+	body.tools = (body.tools as unknown[]).map((tool) => {
+		const name = toolNameOf(tool);
+		if (!name || !OPENCODE_TOOL_NAMES.has(name.toLowerCase())) return tool;
+		const alias = `${name}_pi`;
+		wireToCaller.set(alias, name);
+		if (tool && typeof tool === "object" && !Array.isArray(tool)) {
+			const t = tool as Record<string, unknown>;
+			if (t.function && typeof t.function === "object")
+				(t.function as Record<string, unknown>).name = alias;
+			else if (typeof t.name === "string") t.name = alias;
+		}
+		return tool;
+	});
+	if (wireToCaller.size) body.__bansosToolAliases = Object.fromEntries(wireToCaller);
+	// 2) Append the exact opencode read+shell definitions (skipping any that
+	// the caller already declared verbatim — the alias pass renames those).
+	const present = new Set<string>();
 	for (const tool of body.tools as unknown[]) {
 		const name = toolNameOf(tool);
 		if (name) present.add(name);
 	}
-	let injected = false;
-	for (const name of OPENCODE_FINGERPRINT_TOOLS) {
-		if (present.has(name)) continue;
-		(body.tools as unknown[]).push({
-			type: "function",
-			function: {
-				name,
-				description: `OpenCode built-in ${name} tool`,
-				parameters: { type: "object", properties: {} },
-			},
-		});
-		injected = true;
+	for (const t of OPENCODE_EXACT_TOOLS) {
+		if (present.has(t.function.name)) continue;
+		(body.tools as unknown[]).push(structuredClone(t));
 	}
-	// Injected decoys must never be callable: the model would
-	// burn the reply calling tools that don't exist downstream. "none" hides
-	// every injected name; caller-declared tools stay callable because pi
-	// always sends an explicit tool list alongside.
-	if (injected && body.tool_choice === undefined) body.tool_choice = "none";
 }
 
 function ensureResponsesFingerprintTools(body: Record<string, unknown>): void {
@@ -214,13 +271,14 @@ function ensureResponsesFingerprintTools(body: Record<string, unknown>): void {
 		const name = toolNameOf(tool);
 		if (name) present.add(name);
 	}
-	for (const name of OPENCODE_FINGERPRINT_TOOLS) {
+	for (const t of OPENCODE_EXACT_TOOLS) {
+		const name = t.function.name;
 		if (present.has(name)) continue;
 		(body.tools as unknown[]).push({
 			type: "function",
 			name,
-			description: `OpenCode built-in ${name} tool`,
-			parameters: { type: "object", properties: {} },
+			description: t.function.description,
+			parameters: t.function.parameters,
 		});
 	}
 	// Responses wire rejects tool_choice:"none" (400 only-"auto"-supported);
@@ -241,10 +299,12 @@ function sanitizeResponsesItems(body: Record<string, unknown>): void {
 	});
 }
 
-/** Rewrite OpenCode free-tier request body to pass Zen client fingerprint gates. */
+/** Rewrite OpenCode free-tier request body to pass Zen client fingerprint gates.
+ * Returns the upstream path segment to use ("/inference/v1/responses" for
+ * muse-class Responses models, else chat completions under the inbound path). */
 function transformOpencodeBody(
 	body: Record<string, unknown>,
-): Record<string, unknown> {
+): { body: Record<string, unknown>; responsesPath: boolean } {
 	// Gate: stream:false → 403 even with valid UA/session/tools.
 	body.stream = true;
 	const model = typeof body.model === "string" ? body.model : "";
@@ -260,10 +320,10 @@ function transformOpencodeBody(
 		body.store = false;
 		ensureResponsesFingerprintTools(body);
 		sanitizeResponsesItems(body);
-	} else {
-		ensureChatFingerprintTools(body);
+		return { body, responsesPath: true };
 	}
-	return body;
+	ensureChatFingerprintTools(body);
+	return { body, responsesPath: false };
 }
 
 // ── Relay egress (vercel/cloudflare worker, x-relay-target pattern) ──────────
@@ -940,8 +1000,10 @@ function catalogIds(data: unknown): Set<string> | null {
 }
 async function opencodeCatalog(): Promise<Set<string> | null> {
 	try {
+		// /zen/v1/models still answers 200 (chat moved to /inference/v1, the
+		// models fetcher did not). Keep the request header on this v1 surface.
 		const r = await fetch(`${API}/models`, {
-			headers: opencodeHeaders(),
+			headers: opencodeHeaders(true),
 			signal: AbortSignal.timeout(10_000),
 		});
 		return r.ok ? catalogIds(await r.json()) : null;
@@ -1005,10 +1067,13 @@ function sanitizeHeaders(
 
 // ponytail: shared stream pipe — upstream abort/timeout must end response,
 // not become an uncaught exception that crashes pi.
+// When `aliases` is set (caller tools renamed for the v2 gate), SSE lines are
+// scanned for the wire names and restored to the caller's names before flush.
 function pipeUpstreamStream(
 	nodeStream: Readable,
 	res: http.ServerResponse,
 	req: http.IncomingMessage,
+	aliases?: Record<string, string>,
 ): void {
 	nodeStream.on("error", (e: unknown) => {
 		log("error", "upstream stream error", { error: String(e) });
@@ -1023,7 +1088,29 @@ function pipeUpstreamStream(
 			);
 		} catch {}
 	});
-	nodeStream.pipe(res);
+	if (aliases && Object.keys(aliases).length) {
+		let carry = "";
+		nodeStream.on("data", (chunk: Buffer) => {
+			let text = carry + chunk.toString("utf8");
+			const lines = text.split("\n");
+			carry = lines.pop() ?? "";
+			const out = lines
+				.map((line) =>
+					line.includes("_pi")
+						? line.replace(/([A-Za-z0-9_-]+)_pi\b/g, (_m, base) => aliases[`${base}_pi`] ?? `${base}_pi`)
+						: line,
+				)
+				.join("\n");
+			if (out && !res.writableEnded) res.write(out);
+		});
+		nodeStream.on("end", () => {
+			const tail = carry.replace(/([A-Za-z0-9_-]+)_pi\b/g, (_m, base) => aliases[`${base}_pi`] ?? `${base}_pi`);
+			if (tail && !res.writableEnded) res.write(tail);
+			res.end();
+		});
+	} else {
+		nodeStream.pipe(res);
+	}
 	req.on("aborted", () => {
 		if (!nodeStream.destroyed) nodeStream.destroy();
 	});
@@ -1152,8 +1239,9 @@ function startProxy(
 					let opencodeBody = bodyChunks.length
 						? Buffer.concat(bodyChunks)
 						: Buffer.alloc(0);
+					let museResponses = false;
 					if (parsedBody) {
-						transformOpencodeBody(parsedBody);
+						museResponses = transformOpencodeBody(parsedBody).responsesPath;
 						if (relayState.enabled && relayState.url) {
 							const mt =
 								parsedBody.max_tokens ??
@@ -1172,8 +1260,29 @@ function startProxy(
 						opencodeBody = Buffer.from(JSON.stringify(parsedBody));
 					}
 
+					// Extract the alias map the transform stored on the body —
+					// stripped before send (upstream rejects unknown fields).
+					let toolAliases: Record<string, string> | undefined;
+					if (parsedBody && parsedBody.__bansosToolAliases) {
+						toolAliases = parsedBody.__bansosToolAliases as Record<string, string>;
+						delete parsedBody.__bansosToolAliases;
+						opencodeBody = Buffer.from(JSON.stringify(parsedBody));
+					}
+
 					if (relayState.enabled && relayState.url) {
-						const fullUrl = `${UPSTREAM_OPENCODE}${req.url ?? "/"}`;
+						// Free-tier chat lives on /inference/v1 (v2 gate). Inbound
+						// /v1/chat/completions from pi is rewritten to the live
+						// surface; muse-class models take /inference/v1/responses.
+						const inbound = req.url ?? "/";
+						let upstreamPath: string;
+						if (museResponses) {
+							upstreamPath = "/inference/v1/responses";
+						} else if (inbound.startsWith("/v1/")) {
+							upstreamPath = `/inference/v1${inbound.slice(3)}`;
+						} else {
+							upstreamPath = inbound;
+						}
+						const fullUrl = `${UPSTREAM_OPENCODE}${upstreamPath}`;
 						const relayHeaders = sanitizeHeaders(
 							req.headers,
 							new URL(relayState.url).host,
@@ -1200,9 +1309,12 @@ function startProxy(
 									),
 									res,
 									req,
+									toolAliases,
 								);
 							} else {
-								const data = await response.text();
+								let data = await response.text();
+								if (toolAliases)
+									data = data.replace(/([A-Za-z0-9_-]+)_pi\b/g, (m, base) => toolAliases?.[`${base}_pi`] ?? m);
 								res.writeHead(response.status, { "content-type": ct });
 								res.end(data);
 							}
@@ -1217,12 +1329,18 @@ function startProxy(
 					// direct path
 					const fwd = sanitizeHeaders(req.headers, target.hostname);
 					fwd["content-length"] = String(opencodeBody.length);
+					// Same rewrite as the relay path (muse → responses surface).
+					const directPath = museResponses
+						? "/inference/v1/responses"
+						: (req.url ?? "").startsWith("/v1/")
+							? `/inference/v1${(req.url ?? "").slice(3)}`
+							: (req.url ?? "/");
 					const proxy = https.request(
 						{
 							method: req.method,
 							hostname: target.hostname,
 							port: 443,
-							path: target.pathname + target.search,
+							path: directPath,
 							headers: fwd,
 						},
 						(upstream) => {
@@ -1235,10 +1353,18 @@ function startProxy(
 								const val = upstream.headers[h];
 								if (typeof val === "string") outHeaders[h] = val;
 							}
-							outHeaders["x-content-type-options"] = "nosniff";
-							res.writeHead(upstream.statusCode ?? 502, outHeaders);
-							upstream.pipe(res);
-						},
+						outHeaders["x-content-type-options"] = "nosniff";
+						res.writeHead(upstream.statusCode ?? 502, outHeaders);
+						// Reuse the same alias-restore pipe as the relay path.
+						// The https response is a Node IncomingMessage (a Readable),
+						// so it drops straight into pipeUpstreamStream.
+						pipeUpstreamStream(
+							upstream as unknown as Readable,
+							res,
+							req,
+							toolAliases,
+						);
+					},
 					);
 					proxy.on("error", () => {
 						if (!res.headersSent) {
