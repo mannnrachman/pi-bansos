@@ -1,5 +1,10 @@
 # Changelog
 
+## [0.6.1] - 2026-10-15
+
+### Fixed
+- Republish of 0.6.0 — identical code. The 0.6.0 upload was accepted by npm (HTTP 202) but never finalized on the registry (stuck in staging >25 min, then permanently stage-locked), so it never became installable. No code changes: the v2-gate port ships here.
+
 ## [0.6.0] - 2026-10-15
 
 ### Fixed
