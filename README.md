@@ -36,7 +36,7 @@ Free model provider for **[pi](https://pi.dev)** ([browse packages](https://pi.d
 
 ### OpenCode Zen (16 models)
 
-| Model ID                                             | Name                             | Vision | Context     | Max Output  | Reasoning |
+| Model ID                          | Name                        | Vision | API       | Context     | Max Output  | Reasoning |
 | --------------------------------- | --------------------------- | ------ | --------- | ----------- | ----------- | --------- |
 | `muse-spark-1.3-contributor-free` | Muse Spark 1.3 Free         | ✅      | responses | 1M tokens   | 131K tokens | ✅         |
 | `muse-spark-1.2-contributor-free` | Muse Spark 1.2 Free         | ✅      | responses | 1M tokens   | 131K tokens | ✅         |
