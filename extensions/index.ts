@@ -638,7 +638,8 @@ interface ModelDef {
 }
 
 // OpenCode Zen free models verified against the live catalog and inference APIs.
-// Last verified: 2026-10-09 — added step-5-preview-free (catalog IN, chat 200
+// New free models chat-verified 2026-10-16 (HTTP 200, final answer OK).
+// Previously verified: 2026-10-09 — added step-5-preview-free (catalog IN, chat 200
 // via proxy; upstream flaky, occasionally 502 "Endpoint is unavailable").
 // Dropped: fledge-alpha-free, mimo-v2.5-free (upstream "Model not supported").
 // Free-tier gate requires bash+read tool pair in the payload (verified by
@@ -746,10 +747,48 @@ const KNOWN_MODELS: ModelDef[] = [
 		contextWindow: 1_000_000,
 		maxTokens: 131_072,
 	},
+	{
+		id: "deepseek-v4.1-flash-free",
+		name: "DeepSeek V4.1 Flash Free",
+		reasoning: true,
+		contextWindow: 200_000,
+		maxTokens: 32_000,
+		input: ["text", "image"],
+	},
+	{
+		id: "glm-5.3-flash-free",
+		name: "GLM 5.3 Flash Free",
+		reasoning: true,
+		contextWindow: 200_000,
+		maxTokens: 32_000,
+		input: ["text", "image"],
+	},
+	{
+		id: "cat-jam-free",
+		name: "Cat Jam Free",
+		reasoning: true,
+		contextWindow: 1_048_576,
+		maxTokens: 131_072,
+	},
+	{
+		id: "ll-alpha-free",
+		name: "LL Alpha Free",
+		reasoning: true,
+		contextWindow: 262_144,
+		maxTokens: 65_536,
+	},
+	{
+		id: "nemotron-3.5-super-vl-free",
+		name: "Nemotron 3.5 Super VL Free",
+		reasoning: true,
+		contextWindow: 1_048_576,
+		maxTokens: 131_072,
+		input: ["text", "image"],
+	},
 ];
 
 // KiloCode gateway free models (keyless — https://kilo.ai/docs/gateway).
-// Specs match the live catalog fetched on 2026-10-05.
+// New additions match the live catalog and chat probes on 2026-10-16.
 const KILO_MODELS: ModelDef[] = [
 	{
 		id: "kilo-auto/free",
@@ -856,6 +895,31 @@ const KILO_MODELS: ModelDef[] = [
 		contextWindow: 1_048_576,
 		maxTokens: 262_144,
 		input: ["text", "image"],
+		thinkingFormat: "openrouter",
+	},
+	{
+		id: "nvidia/nemotron-3.5-super-vl:free",
+		name: "Nemotron 3.5 Super VL Free",
+		reasoning: true,
+		contextWindow: 1_000_000,
+		maxTokens: 131_072,
+		input: ["text", "image"],
+		thinkingFormat: "openrouter",
+	},
+	{
+		id: "stealth/glyph-cluster",
+		name: "Glyph Cluster Free",
+		reasoning: true,
+		contextWindow: 256_000,
+		maxTokens: 256_000,
+		thinkingFormat: "openrouter",
+	},
+	{
+		id: "stealth/cat-jam",
+		name: "Cat Jam Free",
+		reasoning: true,
+		contextWindow: 1_048_576,
+		maxTokens: 131_072,
 		thinkingFormat: "openrouter",
 	},
 ];

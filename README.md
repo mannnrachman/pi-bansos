@@ -22,7 +22,7 @@ Free model provider for **[pi](https://pi.dev)** ([browse packages](https://pi.d
 ## Features
 
 - **Zero cost** — all models free, no API key needed for supported upstreams
-- **24 models from 2 sources** — 11 OpenCode Zen + 13 KiloCode gateway
+- **32 models from 2 sources** — 16 OpenCode Zen + 16 KiloCode gateway
 - **Instant startup** — the model catalog is cached locally and registered without waiting on upstream; it refreshes in the background
 - **Auto health-check** — only catalog-listed models registered; dead ones skipped silently
 - **Local-only proxy** — binds to `127.0.0.1`, nothing exposed externally; one proxy per loaded extension, shared by every session that uses it (including OMP's in-process subagents)
@@ -32,11 +32,11 @@ Free model provider for **[pi](https://pi.dev)** ([browse packages](https://pi.d
 
 ## Models
 
-**24 total: 11 OpenCode + 13 KiloCode.** All models are free. The provider is one `bansos` entry, but model names show their upstream: **OpenCode** or **KiloCode**. The startup check only verifies catalog membership; upstream access can still change between startup and a request.
+**32 curated total: 16 OpenCode + 16 KiloCode.** All models are free. The provider is one `bansos` entry, but model names show their upstream: **OpenCode** or **KiloCode**. The startup check only verifies catalog membership; upstream access can still change between startup and a request.
 
-### OpenCode Zen (11 models)
+### OpenCode Zen (16 models)
 
-| Model ID                          | Name                        | Vision | API       | Context     | Max Output  | Reasoning |
+| Model ID                                             | Name                             | Vision | Context     | Max Output  | Reasoning |
 | --------------------------------- | --------------------------- | ------ | --------- | ----------- | ----------- | --------- |
 | `muse-spark-1.3-contributor-free` | Muse Spark 1.3 Free         | ✅      | responses | 1M tokens   | 131K tokens | ✅         |
 | `muse-spark-1.2-contributor-free` | Muse Spark 1.2 Free         | ✅      | responses | 1M tokens   | 131K tokens | ✅         |
@@ -49,6 +49,12 @@ Free model provider for **[pi](https://pi.dev)** ([browse packages](https://pi.d
 | `nemotron-3-ultra-free`           | Nemotron 3 Ultra Free       | ❌      | chat      | 1M tokens   | 128K tokens | ✅         |
 | `nemotron-3.5-lightning-free`     | Nemotron 3.5 Lightning Free | ❌      | chat      | 262K tokens | 262K tokens | ✅         |
 | `big-pickle`                      | Big Pickle                  | ❌      | chat      | 200K tokens | 32K tokens  | ✅         |
+| `deepseek-v4.1-flash-free`        | DeepSeek V4.1 Flash Free    | ✅      | chat      | 200K tokens | 32K tokens  | ✅         |
+| `glm-5.3-flash-free`              | GLM 5.3 Flash Free          | ✅      | chat      | 200K tokens | 32K tokens  | ✅         |
+| `cat-jam-free`                    | Cat Jam Free                | ❌      | chat      | 1M tokens   | 131K tokens | ✅         |
+| `ll-alpha-free`                   | LL Alpha Free               | ❌      | chat      | 262K tokens | 65K tokens  | ✅         |
+| `nemotron-3.5-super-vl-free`      | Nemotron 3.5 Super VL Free  | ✅      | chat      | 1M tokens   | 131K tokens | ✅         |
+
 
 `step-5-preview-free` is upstream-flaky: occasional 502 "Endpoint is unavailable" between healthy calls — retry.
 
@@ -56,7 +62,7 @@ Free model provider for **[pi](https://pi.dev)** ([browse packages](https://pi.d
 
 Manual check: select `OpenCode · Muse Spark 1.3 Free` in `/model`, then ask it to `Reply with exactly OK.`
 
-### KiloCode Gateway (13 models)
+### KiloCode Gateway (16 models)
 
 Keyless — 200 requests/hour per IP. No `Authorization` header is sent; the free gateway rejects placeholder tokens.
 
@@ -75,6 +81,12 @@ Keyless — 200 requests/hour per IP. No `Authorization` header is sent; the fre
 | `liquid/lfm-2.5-2.6b:free`                           | Liquid LFM 2.5 2.6B Free         | ❌      | 65K tokens  | 8K tokens   | ✅         |
 | `poolside/laguna-s-2.1:free`                         | Laguna S 2.1 Free                | ❌      | 262K tokens | 32K tokens  | ✅         |
 | `thinkingmachines/inkling-small:free`                | Inkling Small Free               | ✅      | 1M tokens   | 262K tokens | ✅         |
+| `nvidia/nemotron-3.5-super-vl:free`                  | Nemotron 3.5 Super VL Free       | ✅      | 1M tokens   | 131K tokens | ✅         |
+| `stealth/glyph-cluster`                              | Glyph Cluster Free               | ❌      | 256K tokens | 256K tokens | ✅         |
+| `stealth/cat-jam`                                    | Cat Jam Free                     | ❌      | 1M tokens   | 131K tokens | ✅         |
+
+New additions were chat-tested on 2026-10-16. Glyph Cluster returned a transient 503 on the first call, then answered `OK` on retry. Kilo's stealth models and NVIDIA free endpoints may retain prompts or use them for training; do not send confidential data.
+
 
 `openrouter/free` is **pinned**: it no longer appears in the `/models` catalog, but chat completions still serve it — so it stays registered.
 
@@ -122,6 +134,17 @@ Notes (from pi packages docs):
 - Unpinned installs (`pi install npm:pi-bansos`) get the latest npm version on update.
 - Pinned installs (`pi install npm:pi-bansos@0.4.13`) are **skipped** by `pi update --extensions` / `pi update --all` until you change the pin (install a newer `@x.y.z` or drop the pin).
 - After update, restart pi (quit and start again) so the new extension code loads.
+
+### Free model catalog update (0.6.4)
+
+Adds eight chat-verified models: OpenCode DeepSeek V4.1 Flash, GLM 5.3 Flash,
+Cat Jam, LL Alpha, and Nemotron 3.5 Super VL; KiloCode Nemotron 3.5 Super VL,
+Glyph Cluster, and Cat Jam. The curated list now has 32 models; the picker only
+shows those present in the upstream catalog (plus the existing pinned model).
+Muse keeps its Responses API configuration unchanged.
+
+Update the package, then restart pi or OMP. `/bansos refresh-models` refreshes
+catalog membership only; it cannot add definitions missing from an older package.
 
 ### Streaming fix (0.6.3)
 

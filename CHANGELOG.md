@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.6.4] - 2026-10-16
+
+### Added
+- Eight chat-verified free models: OpenCode DeepSeek V4.1 Flash, GLM 5.3 Flash, Cat Jam, LL Alpha, and Nemotron 3.5 Super VL; Kilo Nemotron 3.5 Super VL, Glyph Cluster, and Cat Jam.
+- Live checks through pi with tools disabled and with `read` enabled; catalog regression tests cover registration, upstream routing, paid-model exclusion, and Muse's unchanged Responses API.
+- Model limits and input modalities follow the provider catalogs. Glyph Cluster may return transient 503 errors; Kilo stealth/NVIDIA free endpoints may retain prompts or use them for training.
+
 ## [0.6.3] - 2026-10-16
 
 ### Fixed
