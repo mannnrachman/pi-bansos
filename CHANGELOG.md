@@ -1,5 +1,14 @@
 # Changelog
 
+## [0.6.2] - 2026-10-16
+
+### Fixed
+- Preserve SSE line terminators and empty event separators when restoring tool aliases, fixing malformed event JSON with default tools ([#12](https://github.com/mannnrachman/pi-bansos/issues/12)).
+- Decode UTF-8 incrementally with a per-stream `StringDecoder` so characters split across network chunks remain intact, including the final decoder flush.
+
+### Tests
+- Added chunk-boundary regression tests covering LF, CRLF, Unicode, empty separator lines, an unterminated final line, and no-alias passthrough. Each alias fixture runs as one chunk, at every two-chunk byte split, and in one-byte chunks.
+
 ## [0.6.1] - 2026-10-15
 
 ### Fixed

@@ -10,6 +10,7 @@ import https from "node:https";
 import { homedir } from "node:os";
 import path from "node:path";
 import { Readable } from "node:stream";
+import { StringDecoder } from "node:string_decoder";
 import { fileURLToPath } from "node:url";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 
@@ -1089,9 +1090,10 @@ function pipeUpstreamStream(
 		} catch {}
 	});
 	if (aliases && Object.keys(aliases).length) {
+		const decoder = new StringDecoder("utf8");
 		let carry = "";
 		nodeStream.on("data", (chunk: Buffer) => {
-			let text = carry + chunk.toString("utf8");
+			const text = carry + decoder.write(chunk);
 			const lines = text.split("\n");
 			carry = lines.pop() ?? "";
 			const out = lines
@@ -1101,9 +1103,12 @@ function pipeUpstreamStream(
 						: line,
 				)
 				.join("\n");
-			if (out && !res.writableEnded) res.write(out);
+			// Preserve terminators even when the completed line is empty:
+			// blank lines delimit SSE events, including across chunk boundaries.
+			if (lines.length && !res.writableEnded) res.write(out + "\n");
 		});
 		nodeStream.on("end", () => {
+			carry += decoder.end();
 			const tail = carry.replace(/([A-Za-z0-9_-]+)_pi\b/g, (_m, base) => aliases[`${base}_pi`] ?? `${base}_pi`);
 			if (tail && !res.writableEnded) res.write(tail);
 			res.end();

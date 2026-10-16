@@ -123,6 +123,17 @@ Notes (from pi packages docs):
 - Pinned installs (`pi install npm:pi-bansos@0.4.13`) are **skipped** by `pi update --extensions` / `pi update --all` until you change the pin (install a newer `@x.y.z` or drop the pin).
 - After update, restart pi (quit and start again) so the new extension code loads.
 
+### Streaming fix (0.6.2)
+
+If 0.6.1 reports `malformed server-sent event JSON` with default tools enabled,
+update to 0.6.2 or later and restart pi. Tool-alias rewriting now preserves SSE
+line endings and empty event separators, and decodes split UTF-8 characters
+incrementally. This does not resolve upstream model outages or rate limits
+([issue #12](https://github.com/mannnrachman/pi-bansos/issues/12)).
+
+Maintainers can run the chunk-boundary regression suite with
+`bun test tests/stream-framing.test.ts` (requires Bun; no extra dependencies).
+
 ### OMP (Oh My Pi)
 
 `omp plugin upgrade` only upgrades **marketplace** plugins (`name@marketplace`). npm plugins like `pi-bansos` are not that format.
