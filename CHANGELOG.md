@@ -1,5 +1,10 @@
 # Changelog
 
+## [0.6.3] - 2026-10-16
+
+### Fixed
+- npm installable release of the [0.6.2] SSE framing fix ([#12](https://github.com/mannnrachman/pi-bansos/issues/12)). Identical code. The `0.6.2` upload was accepted by the registry but never finalized (stage-locked / `409` on republish), so `0.6.3` is the version users should install. Git history keeps the original `0.6.2` fix commit; there is no separate code delta for `0.6.3`.
+
 ## [0.6.2] - 2026-10-16
 
 ### Fixed
@@ -8,6 +13,9 @@
 
 ### Tests
 - Added chunk-boundary regression tests covering LF, CRLF, Unicode, empty separator lines, an unterminated final line, and no-alias passthrough. Each alias fixture runs as one chunk, at every two-chunk byte split, and in one-byte chunks.
+
+### Note
+- This version never became installable on npm (registry staging lock). Use **`0.6.3`**.
 
 ## [0.6.1] - 2026-10-15
 
