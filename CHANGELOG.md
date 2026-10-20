@@ -1,5 +1,16 @@
 # Changelog
 
+## [0.7.0] - 2026-10-20
+
+### Added
+- **Cloudflare Workers relay deploy** ([#13](https://github.com/mannnrachman/pi-bansos/issues/13)): `/bansos deploy` now offers Cloudflare (recommended) alongside Vercel. Free plan, no credit card; 100 K requests/day covers a heavy agentic day 20–50×. One command resolves the account, uploads a module worker, enables workers.dev routing, and activates the relay; a post-upload failure deletes the script so no worker with an embedded secret lingers. Deploy design adapted from [trefeon/pi-freeflow](https://github.com/trefeon/pi-freeflow) (MIT).
+- **Hardened relay worker**: per-deployment random 32-byte secret (`x-relay-auth`, constant-time compare, `401` without match), method + 32 MB payload guards, private/loopback-host and embedded-credential checks, hop-by-hop header stripping, and a strict two-upstream allowlist (`opencode.ai`, `api.kilo.ai`). Relay secrets are stored per relay in the state file and sent automatically.
+- **403-aware relay failover**: a 403 through a relay now cools that relay down (90 s base, escalating) and rolls to the next candidate, matching OpenCode's new IP-level block (403 *"abusive traffic from this IP address"* — distinct from a fingerprint `FreeTierError`). Previously 403 was treated as a terminal client error.
+
+### Changed
+- **Model sweep 2026-10-20** (live probe, full fingerprint, of every registered id): OpenCode deprecated muse-spark-1.3/1.2, space-bunny and ll-alpha (`410`); step-5-preview and ling-3.0/3.1 are upstream-unavailable (`400`). Added catalog-listed `beam-free` and `minimax-m3.1-flash-free` (named by space-bunny's deprecation notice as its replacement) — not yet chat-verified because the probe IP hit the new IP-level block; the fingerprint itself passes. KiloCode added `minimax/minimax-m3.1-flash:free` and `xingchen-agi/xing4.0-29b-a4b:free` (both chat 200); removed `stealth/glyph-cluster` and `stealth/cat-jam` (401 sign-in required), `poolside/laguna-xs-2.1:free` (consistent 429) and `liquid/lfm-2.5-2.6b:free` (consistent 504). Catalog: 32 → 25 (11 OpenCode + 14 KiloCode).
+- Catalog regression tests now assert the live 2026-10-20 free lists and that every dropped id stays dropped.
+
 ## [0.6.4] - 2026-10-16
 
 ### Added

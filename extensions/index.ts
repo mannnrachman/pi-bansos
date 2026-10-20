@@ -93,7 +93,10 @@ const OPENCODE_TOOL_NAMES = new Set([
 // insurance against a stricter gate.
 const OPENCODE_PROJECT_ID = randomBytes(20).toString("hex");
 const OPENCODE_SESSION_RE = /^ses_[0-9a-f]{12}[0-9A-Za-z]{14}$/;
-const OPENCODE_RESPONSES_MODELS = new Set([
+// Muse went 410-deprecated in the 2026-10-20 sweep; the set and the
+// `includes("muse-spark")` fallback in transformOpencodeBody stay so a
+// returning muse-class model re-routes to /responses with no code change.
+const OPENCODE_RESPONSES_MODELS = new Set<string>([
 	"muse-spark-1.2-contributor-free",
 	"muse-spark-1.3-contributor-free",
 ]);
@@ -376,7 +379,13 @@ function resolveRelayStatePath(): string {
 }
 const RELAY_STATE_FILE = resolveRelayStatePath();
 
-type KnownRelay = { url: string; label?: string; addedAt?: string };
+type KnownRelay = {
+	url: string;
+	label?: string;
+	addedAt?: string;
+	/** Shared secret for hardened workers (x-relay-auth). Empty = legacy relay. */
+	auth?: string;
+};
 // TUI status-bar entry for the relay/proxy state; display preference only.
 type StatusBar = "shown" | "hidden";
 type RelayState = {
@@ -415,10 +424,20 @@ function saveRelayState(s: RelayState): SaveResult {
 		return { ok: false, error: String(e) };
 	}
 }
-// dedupe-add a relay to the known list
-function ensureRelay(s: RelayState, url: string, label?: string): void {
-	if (!url || s.relays.some((r) => r.url === url)) return;
-	s.relays.push({ url, label, addedAt: new Date().toISOString() });
+// dedupe-add a relay to the known list (auth: shared secret for hardened workers)
+function ensureRelay(s: RelayState, url: string, label?: string, auth?: string): void {
+	if (!url) return;
+	const existing = s.relays.find((r) => r.url === url);
+	if (existing) {
+		if (auth) existing.auth = auth;
+		return;
+	}
+	s.relays.push({
+		url,
+		label,
+		addedAt: new Date().toISOString(),
+		...(auth ? { auth } : {}),
+	});
 }
 function removeRelay(s: RelayState, url: string): void {
 	s.relays = s.relays.filter((r) => r.url !== url);
@@ -448,10 +467,11 @@ function markRelaySuccess(url: string): void {
 function markRelayFailure(url: string, status?: number): void {
 	const prev = relayHealth.get(url) ?? { consecutiveFailures: 0, cooldownUntil: 0 };
 	const consecutive = prev.consecutiveFailures + 1;
-	// 429 = quota hit: give it a real rest (90s base). Transport errors /
-	// 5xx are usually transient: 30s. Escalate ×2 per consecutive failure
-	// so a dead relay stops being re-hammered (cap 15 min).
-	const base = status === 429 ? 90_000 : 30_000;
+	// 429 = quota hit: give it a real rest (90s base). 403 = egress IP flagged
+	// by the upstream IP gate: same rest. Transport errors / 5xx are usually
+	// transient: 30s. Escalate ×2 per consecutive failure so a dead relay
+	// stops being re-hammered (cap 15 min).
+	const base = status === 429 || status === 403 ? 90_000 : 30_000;
 	const cooldownMs = Math.min(base * 2 ** (consecutive - 1), 15 * 60_000);
 	relayHealth.set(url, {
 		consecutiveFailures: consecutive,
@@ -484,9 +504,12 @@ type RegisteredModel = ModelDef & { source: Upstream };
 let aliveCatalog: RegisteredModel[] = [];
 
 // Relay-aware fetch. Direct when disabled; otherwise try the relay pool in
-// health order (rolling failover on 429/5xx/socket errors) and fall back to
-// direct only when every relay failed. The response body is consumed by the
-// caller; failures are detected via status + copy of the body text.
+// health order (rolling failover on 429/403-relay/5xx/socket errors) and fall
+// back to direct only when every relay failed. The response body is consumed
+// by the caller; failures are detected via status + copy of the body text.
+// A 403 through a relay is attributed to the relay (its egress IP may be
+// flagged by OpenCode's IP gate — distinct from a fingerprint FreeTierError,
+// which 403s identically on every egress); it cools down and rolls once.
 async function relayFetch(
 	url: string,
 	opts: RequestInit = {},
@@ -502,16 +525,23 @@ async function relayFetch(
 			const headers = new Headers(opts.headers);
 			headers.set("x-relay-target", `${u.protocol}//${u.host}`);
 			headers.set("x-relay-path", `${u.pathname}${u.search}`);
+			const relayAuth = relayState.relays.find((r) => r.url === relay)?.auth;
+			if (relayAuth) headers.set("x-relay-auth", relayAuth);
 			const res = await fetch(relay, { ...opts, headers });
-			if (res.ok || (res.status >= 400 && res.status < 500 && res.status !== 429 && res.status !== 408)) {
-				// Success, or a client error that is OUR payload's fault (400/401/
-				// 403/404…) — rolling to another relay would replay the same
-				// failure. 4xx-except-429/408 returns as-is.
+			// 401 from a hardened worker = auth mismatch; distinct from the
+			// upstream's own 401 (which reaches us as a 401 relay RESPONSE
+			// body passthrough — but a bare 401 from the worker itself means
+			// our stored secret is wrong/absent). Treat like a client error:
+			// rolling won't fix the payload, surface it.
+			if (res.ok || (res.status >= 400 && res.status < 500 && res.status !== 429 && res.status !== 408 && res.status !== 403)) {
+				// Success, or a client error that is OUR payload's fault (400/
+				// 401/404…) — rolling to another relay would replay the same
+				// failure. 4xx-except-429/408/403 returns as-is.
 				markRelaySuccess(relay);
 				return res;
 			}
-			// 429/408/5xx: this egress IP is limited or the relay is unhealthy —
-			// cool it down and roll to the next candidate.
+			// 429/408/403/5xx: this egress IP is limited/flagged or the relay
+			// is unhealthy — cool it down and roll to the next candidate.
 			markRelayFailure(relay, res.status);
 			// Drain the error body so the socket is released before retrying.
 			await res.arrayBuffer().catch(() => undefined);
@@ -616,6 +646,206 @@ async function deployVercelRelay(
 	throw new Error("Deployment timed out (120s)");
 }
 
+// ── Deploy a fresh Cloudflare Workers relay ─────────────────────────────────
+// Token is used in-memory only and NEVER persisted. Deploy flow (accounts →
+// PUT module worker → enable workers.dev routing → read account subdomain →
+// assemble URL; delete the script on any post-upload failure so no worker
+// with an embedded secret lingers). Deploy design adapted from
+// trefeon/pi-freeflow (MIT) — https://github.com/trefeon/pi-freeflow
+const CLOUDFLARE_API = "https://api.cloudflare.com/client/v4";
+
+/** Worker script names: [a-z0-9-] (also [a-z0-9_], max 58 chars). */
+function cloudflareScriptName(name: string): string {
+	const slug = name
+		.toLowerCase()
+		.replace(/[^a-z0-9-]+/g, "-")
+		.replace(/^-+|-+$/g, "")
+		.slice(0, 58);
+	return slug || `bansos-relay-${Date.now().toString(36)}`;
+}
+
+/** Hardened relay core: per-deploy 32-byte secret (x-relay-auth, constant-time
+ * compare), method/payload guards, private-host + embedded-credential checks,
+ * and an allowlist of exactly the two upstreams pi-bansos talks to. */
+function buildCloudflareRelayWorker(relayAuth: string): string {
+	return `// pi-bansos relay (cloudflare). Allowlist only — anything else is abuse.
+const ALLOWED_TARGETS = ["https://opencode.ai", "https://api.kilo.ai"];
+const RELAY_AUTH = ${JSON.stringify(relayAuth)};
+const DENY_HEADERS = ["host", "connection", "content-length", "keep-alive", "proxy-connection", "proxy-authenticate", "proxy-authorization", "transfer-encoding", "te", "trailer", "upgrade", "x-relay-target", "x-relay-path"];
+function timingSafeEqualStr(a, b) {
+  let diff = a.length ^ b.length;
+  const len = Math.max(a.length, b.length);
+  for (let i = 0; i < len; i++) diff |= (a.charCodeAt(i) || 0) ^ (b.charCodeAt(i) || 0);
+  return diff === 0;
+}
+const json = (error, status) => new Response(JSON.stringify({ error }), { status, headers: { "content-type": "application/json" } });
+export default {
+  async fetch(request) {
+    if (!["GET", "POST", "HEAD", "OPTIONS"].includes(request.method)) return json("Method Not Allowed", 405);
+    if (Number(request.headers.get("content-length") || 0) > 32 * 1024 * 1024) return json("Payload Too Large", 413);
+    if (!RELAY_AUTH || !timingSafeEqualStr(request.headers.get("x-relay-auth") || "", RELAY_AUTH)) return json("unauthorized", 401);
+    const target = request.headers.get("x-relay-target");
+    if (!target) return json("Missing x-relay-target header", 400);
+    let targetUrl;
+    try { targetUrl = new URL(target); } catch { return json("invalid x-relay-target", 400); }
+    if (targetUrl.protocol !== "https:") return json("forbidden x-relay-target protocol", 403);
+    if (targetUrl.username || targetUrl.password) return json("forbidden x-relay-target (embedded credentials)", 403);
+    const host = targetUrl.hostname.toLowerCase();
+    if (host === "localhost" || host.endsWith(".localhost") || host.endsWith(".local") || host.endsWith(".internal") || host.endsWith(".internal."))
+      return json("forbidden x-relay-target (private/loopback host)", 403);
+    if (host.includes(":") && (host.startsWith("fc") || host.startsWith("fd") || host.startsWith("fe8") || host.startsWith("fe9") || host.startsWith("fea") || host.startsWith("feb")))
+      return json("forbidden x-relay-target (private/loopback host)", 403);
+    const v4 = host.match(/^(\\d{1,3})\\.(\\d{1,3})\\.(\\d{1,3})\\.(\\d{1,3})$/);
+    if (v4) {
+      const [a, b] = [Number(v4[1]), Number(v4[2])];
+      if (a === 0 || a === 10 || a === 127) return json("forbidden x-relay-target (private/loopback host)", 403);
+      if (a === 169 && b === 254) return json("forbidden x-relay-target (private/loopback host)", 403);
+      if (a === 192 && b === 168) return json("forbidden x-relay-target (private/loopback host)", 403);
+      if (a === 172 && b >= 16 && b <= 31) return json("forbidden x-relay-target (private/loopback host)", 403);
+      if (a === 100 && b >= 64 && b <= 127) return json("forbidden x-relay-target (private/loopback host)", 403);
+    }
+    const cleanTarget = target.replace(/\\/$/, "");
+    if (!ALLOWED_TARGETS.includes(cleanTarget)) return json("Forbidden target", 403);
+    const relayPath = request.headers.get("x-relay-path") || "/";
+    if (typeof relayPath !== "string" || relayPath.includes("@") || relayPath.includes("\\\\") || !relayPath.startsWith("/"))
+      return json("forbidden x-relay-path", 403);
+    let finalUrl;
+    try { finalUrl = new URL(relayPath, targetUrl); } catch { return json("forbidden x-relay-path", 403); }
+    if (finalUrl.hostname !== targetUrl.hostname || finalUrl.protocol !== targetUrl.protocol || finalUrl.port !== targetUrl.port || finalUrl.username || finalUrl.password)
+      return json("forbidden x-relay-path (host mismatch)", 403);
+    const headers = new Headers(request.headers);
+    for (const h of DENY_HEADERS) headers.delete(h);
+    headers.delete("x-relay-auth");
+    try {
+      const init = { method: request.method, headers };
+      if (request.method !== "GET" && request.method !== "HEAD") { init.body = request.body; init.duplex = "half"; }
+      const response = await fetch(finalUrl.toString(), init);
+      return new Response(response.body, { status: response.status, headers: response.headers });
+    } catch (error) {
+      return json(String(error), 502);
+    }
+  },
+};`;
+}
+
+async function cloudflareError(action: string, res: Response): Promise<Error> {
+	const j = (await res
+		.json()
+		.catch(() => ({}))) as {
+		errors?: Array<{ message?: string; code?: number }>;
+	};
+	const detail =
+		j.errors
+			?.map((e) => e.message)
+			.filter(Boolean)
+			.join("; ") || `HTTP ${res.status}`;
+	if (res.status === 401 || res.status === 403)
+		return new Error(
+			`Cloudflare authentication failed while trying to ${action}: ${detail}. Check that your API token is valid and has Workers permissions.`,
+		);
+	if (res.status === 429)
+		return new Error(
+			`Cloudflare plan or usage limit hit while trying to ${action}: ${detail}. Check your Workers plan limits.`,
+		);
+	return new Error(`Failed to ${action} (HTTP ${res.status}): ${detail}`);
+}
+
+async function deployCloudflareRelay(
+	token: string,
+	name: string,
+	onProgress?: (msg: string) => void,
+): Promise<{ url: string; auth: string }> {
+	const auth = { Authorization: `Bearer ${token}` };
+	const scriptName = cloudflareScriptName(name);
+
+	// 1. resolve the account scoped to this token
+	onProgress?.("Resolving Cloudflare account…");
+	const accRes = await fetch(`${CLOUDFLARE_API}/accounts`, { headers: auth });
+	if (!accRes.ok) throw await cloudflareError("resolve Cloudflare account", accRes);
+	const accJson = (await accRes.json()) as { result?: Array<{ id?: string }> };
+	const accountId = accJson.result?.[0]?.id;
+	if (!accountId) throw new Error("No Cloudflare account is accessible with this API token");
+
+	// 2. upload the module worker (multipart: main module + metadata).
+	// Private by default: mint a per-deployment secret embedded in the worker.
+	// The client must send it back as x-relay-auth on every relayed request.
+	onProgress?.("Uploading relay worker to Cloudflare…");
+	const relayAuth = randomBytes(32).toString("hex");
+	const formData = new FormData();
+	formData.append(
+		"index.js",
+		new Blob([buildCloudflareRelayWorker(relayAuth)], {
+			type: "application/javascript+module",
+		}),
+		"index.js",
+	);
+	formData.append(
+		"metadata",
+		new Blob(
+			[
+				JSON.stringify({
+					main_module: "index.js",
+					compatibility_date: "2024-03-20",
+					observability: { enabled: true },
+				}),
+			],
+			{ type: "application/json" },
+		),
+		"metadata.json",
+	);
+	const uploadRes = await fetch(
+		`${CLOUDFLARE_API}/accounts/${accountId}/workers/scripts/${scriptName}`,
+		{ method: "PUT", headers: auth, body: formData },
+	);
+	if (!uploadRes.ok) throw await cloudflareError("upload Worker to Cloudflare", uploadRes);
+
+	// 3. enable workers.dev routing (non-fatal — some accounts pre-enable it)
+	try {
+		await fetch(
+			`${CLOUDFLARE_API}/accounts/${accountId}/workers/scripts/${scriptName}/subdomain`,
+			{
+				method: "POST",
+				headers: { ...auth, "Content-Type": "application/json" },
+				body: JSON.stringify({ enabled: true }),
+			},
+		);
+	} catch {}
+
+	// 4. read the account-level workers.dev subdomain to assemble the public
+	// URL. The script is already uploaded, so any failure below deletes it —
+	// otherwise an unreachable worker (with its embedded secret) lingers.
+	onProgress?.("Reading workers.dev routing…");
+	const deleteScript = () =>
+		fetch(
+			`${CLOUDFLARE_API}/accounts/${accountId}/workers/scripts/${scriptName}`,
+			{ method: "DELETE", headers: auth },
+		).catch(() => undefined);
+	let subRes: Response;
+	try {
+		subRes = await fetch(`${CLOUDFLARE_API}/accounts/${accountId}/workers/subdomain`, {
+			headers: auth,
+		});
+	} catch (e) {
+		await deleteScript();
+		throw e;
+	}
+	if (!subRes.ok) {
+		const err = await cloudflareError("retrieve workers.dev subdomain", subRes);
+		await deleteScript();
+		throw err;
+	}
+	const subJson = (await subRes.json()) as { result?: { subdomain?: string } };
+	const subdomain = subJson.result?.subdomain;
+	if (!subdomain) {
+		await deleteScript();
+		throw new Error(
+			"Worker deployed but workers.dev subdomain is unavailable. Enable a workers.dev subdomain for your account in the Cloudflare dashboard.",
+		);
+	}
+	onProgress?.("Relay live — you're behind Cloudflare's egress now");
+	return { url: `https://${scriptName}.${subdomain}.workers.dev`, auth: relayAuth };
+}
+
 // ── Model Definitions ──────────────────────────────────────────────
 type ProviderApi = "openai-completions" | "openai-responses";
 type Upstream = "opencode" | "kilo";
@@ -638,56 +868,30 @@ interface ModelDef {
 }
 
 // OpenCode Zen free models verified against the live catalog and inference APIs.
-// New free models chat-verified 2026-10-16 (HTTP 200, final answer OK).
-// Previously verified: 2026-10-09 — added step-5-preview-free (catalog IN, chat 200
-// via proxy; upstream flaky, occasionally 502 "Endpoint is unavailable").
-// Dropped: fledge-alpha-free, mimo-v2.5-free (upstream "Model not supported").
-// Free-tier gate requires bash+read tool pair in the payload (verified by
-// bisect; the fingerprint satisfies it). exo-free (410 deprecated),
-// jev-1.13-free (protocol unsupported), deepseek-v4-flash-free (400) rejected live.
+// Sweep 2026-10-20: upstream deprecated muse-spark-1.3/1.2, space-bunny (410,
+// "use minimax-m3.1-flash-free instead") and ll-alpha (410); step-5-preview,
+// ling-3.0/3.1 are gone upstream (400 "Model is unavailable"). Added beam-free
+// and minimax-m3.1-flash-free — catalog-listed today but NOT chat-verified:
+// our test IP hit the new IP-level gate (403 "abusive traffic from this IP
+// address", distinct from FreeTierError). Fingerprint itself passes (410/400
+// responses prove the gate let the request through).
+// Previously: 2026-10-16 chat-verified the dropped entries; exo-free (410),
+// jev-1.13-free (protocol unsupported), deepseek-v4-flash-free (400) rejected.
 const KNOWN_MODELS: ModelDef[] = [
 	{
-		id: "muse-spark-1.3-contributor-free",
-		name: "Muse Spark 1.3 Free",
-		reasoning: true,
-		contextWindow: 1_048_576,
-		maxTokens: 131_072,
-		api: "openai-responses",
-		input: ["text", "image"],
-		thinkingLevelMap: {
-			off: null,
-			minimal: "minimal",
-			low: "low",
-			medium: "medium",
-			high: "high",
-			xhigh: "xhigh",
-			max: "max",
-		},
-	},
-	{
-		id: "muse-spark-1.2-contributor-free",
-		name: "Muse Spark 1.2 Free",
-		reasoning: true,
-		contextWindow: 1_048_576,
-		maxTokens: 131_072,
-		api: "openai-responses",
-		input: ["text", "image"],
-		thinkingLevelMap: {
-			off: null,
-			minimal: "minimal",
-			low: "low",
-			medium: "medium",
-			high: "high",
-			xhigh: "xhigh",
-			max: "max",
-		},
-	},
-	{
-		id: "step-5-preview-free",
-		name: "Step 5 Preview Free",
+		id: "beam-free",
+		name: "Beam Free",
 		reasoning: true,
 		contextWindow: 262_144,
 		maxTokens: 65_536,
+	},
+	{
+		id: "minimax-m3.1-flash-free",
+		name: "MiniMax M3.1 Flash Free",
+		reasoning: true,
+		contextWindow: 1_000_000,
+		maxTokens: 524_288,
+		input: ["text", "image"],
 	},
 	{
 		id: "mimo-v2.6-flash-free",
@@ -696,13 +900,6 @@ const KNOWN_MODELS: ModelDef[] = [
 		contextWindow: 200_000,
 		maxTokens: 32_000,
 		input: ["text", "image"],
-	},
-	{
-		id: "ling-3.0-flash-fin-free",
-		name: "Ling 3.0 Flash Fin Free",
-		reasoning: true,
-		contextWindow: 262_144,
-		maxTokens: 32_768,
 	},
 	{
 		id: "nemotron-3-ultra-free",
@@ -724,21 +921,6 @@ const KNOWN_MODELS: ModelDef[] = [
 		reasoning: true,
 		contextWindow: 200_000,
 		maxTokens: 32_000,
-	},
-	{
-		id: "space-bunny-free",
-		name: "Space Bunny",
-		reasoning: true,
-		contextWindow: 1_000_000,
-		maxTokens: 524_288,
-		input: ["text", "image"],
-	},
-	{
-		id: "ling-3.1-flash-free",
-		name: "Ling 3.1 Flash Free",
-		reasoning: true,
-		contextWindow: 262_144,
-		maxTokens: 32_768,
 	},
 	{
 		id: "longcat-2.5-preview-free",
@@ -771,13 +953,6 @@ const KNOWN_MODELS: ModelDef[] = [
 		maxTokens: 131_072,
 	},
 	{
-		id: "ll-alpha-free",
-		name: "LL Alpha Free",
-		reasoning: true,
-		contextWindow: 262_144,
-		maxTokens: 65_536,
-	},
-	{
 		id: "nemotron-3.5-super-vl-free",
 		name: "Nemotron 3.5 Super VL Free",
 		reasoning: true,
@@ -788,7 +963,14 @@ const KNOWN_MODELS: ModelDef[] = [
 ];
 
 // KiloCode gateway free models (keyless — https://kilo.ai/docs/gateway).
-// New additions match the live catalog and chat probes on 2026-10-16.
+// Sweep 2026-10-20: stealth/cat-jam and stealth/glyph-cluster now answer 401
+// PAID_MODEL_AUTH_REQUIRED (stealth lane went sign-in). poolside/laguna-xs
+// 429s consistently (shared pool) and liquid/lfm-2.5 504s consistently —
+// dropped. Added minimax/minimax-m3.1-flash:free (chat 200, image+video in)
+// and xingchen-agi/xing4.0-29b-a4b:free (chat 200 on retry — shared-pool
+// 429s under load, treat flaky). inkling-small kept: healthy except its own
+// provider-side rpd cap. thinkingmachines/inkling-*-large variants are
+// catalog-listed but per-day capped and slow — not registered.
 const KILO_MODELS: ModelDef[] = [
 	{
 		id: "kilo-auto/free",
@@ -796,6 +978,31 @@ const KILO_MODELS: ModelDef[] = [
 		reasoning: false,
 		contextWindow: 256_000,
 		maxTokens: 10_000,
+	},
+	{
+		id: "minimax/minimax-m3.1-flash:free",
+		name: "MiniMax M3.1 Flash Free",
+		reasoning: true,
+		contextWindow: 1_000_000,
+		maxTokens: 524_288,
+		input: ["text", "image"],
+		thinkingLevelMap: {
+			off: null,
+			minimal: "low",
+			low: "low",
+			medium: "medium",
+			high: "high",
+			xhigh: "xhigh",
+			max: "max",
+		},
+	},
+	{
+		id: "xingchen-agi/xing4.0-29b-a4b:free",
+		name: "Xing 4.0 29B A4B Free",
+		reasoning: true,
+		contextWindow: 262_144,
+		maxTokens: 235_929,
+		thinkingFormat: "openrouter",
 	},
 	{
 		id: "nvidia/nemotron-3-ultra-550b-a55b:free",
@@ -829,14 +1036,6 @@ const KILO_MODELS: ModelDef[] = [
 		reasoning: false,
 		contextWindow: 256_000,
 		maxTokens: 64_000,
-	},
-	{
-		id: "poolside/laguna-xs-2.1:free",
-		name: "Laguna XS 2.1 Free",
-		reasoning: true,
-		contextWindow: 262_144,
-		maxTokens: 32_768,
-		thinkingFormat: "openrouter",
 	},
 	{
 		id: "nvidia/nemotron-3-nano-omni-30b-a3b-reasoning:free",
@@ -873,14 +1072,6 @@ const KILO_MODELS: ModelDef[] = [
 		thinkingFormat: "openrouter",
 	},
 	{
-		id: "liquid/lfm-2.5-2.6b:free",
-		name: "Liquid LFM 2.5 2.6B Free",
-		reasoning: true,
-		contextWindow: 65_536,
-		maxTokens: 8_192,
-		thinkingFormat: "openrouter",
-	},
-	{
 		id: "poolside/laguna-s-2.1:free",
 		name: "Laguna S 2.1 Free",
 		reasoning: true,
@@ -904,22 +1095,6 @@ const KILO_MODELS: ModelDef[] = [
 		contextWindow: 1_000_000,
 		maxTokens: 131_072,
 		input: ["text", "image"],
-		thinkingFormat: "openrouter",
-	},
-	{
-		id: "stealth/glyph-cluster",
-		name: "Glyph Cluster Free",
-		reasoning: true,
-		contextWindow: 256_000,
-		maxTokens: 256_000,
-		thinkingFormat: "openrouter",
-	},
-	{
-		id: "stealth/cat-jam",
-		name: "Cat Jam Free",
-		reasoning: true,
-		contextWindow: 1_048_576,
-		maxTokens: 131_072,
 		thinkingFormat: "openrouter",
 	},
 ];
@@ -1718,16 +1893,30 @@ export default async function (pi: ExtensionAPI) {
 				enabled: boolean,
 				url: string,
 				addLabel?: string,
+				auth?: string,
 			) => {
 				s.enabled = enabled;
 				s.url = (url || "").trim() || DEFAULT_RELAY_URL;
-				if (s.url) ensureRelay(s, s.url, addLabel);
+				if (s.url) ensureRelay(s, s.url, addLabel, auth);
 			};
-			const doDeploy = async () => {
+			const doDeploy = async (platform?: string) => {
 				// Token prompted (not stored). pi's input has no secret mode — shows while typing.
+				const target =
+					platform ||
+					(await ctx.ui.select("Deploy relay to", [
+						"Cloudflare Workers (recommended — free, IP diversity)",
+						"Vercel (needs an account; Hobby caps bandwidth)",
+					])) ||
+					"";
+				const isCloudflare = target.startsWith("Cloudflare");
 				const defaultName = `relay-${Date.now().toString(36)}`;
 				const token = (
-					await ctx.ui.input("Vercel API token (vercel-…):", "")
+					await ctx.ui.input(
+						isCloudflare
+							? "Cloudflare API token (dash.cloudflare.com → My Profile → API Tokens):"
+							: "Vercel API token (vercel-…):",
+						"",
+					)
 				)?.trim();
 				if (!token) {
 					ctx.ui.notify("Deploy cancelled — no token", "warning");
@@ -1739,16 +1928,31 @@ export default async function (pi: ExtensionAPI) {
 					)?.trim() || defaultName;
 				renderStatus(ctx.ui, "deploying relay…");
 				try {
-					const url = await deployVercelRelay(token, name, (m) =>
-						ctx.ui.notify(m, "info"),
-					);
-					if (commit((s) => setRelay(s, true, url, `deployed ${name}`)))
-						ctx.ui.notify(`✓ Deployed & active: ${url}`, "info");
-					else
-						ctx.ui.notify(
-							`Deployed ${url} but not saved — run /bansos use ${url} once the state file is writable`,
-							"warning",
+					if (isCloudflare) {
+						const { url, auth } = await deployCloudflareRelay(
+							token,
+							name,
+							(m) => ctx.ui.notify(m, "info"),
 						);
+						if (commit((s) => setRelay(s, true, url, `deployed ${name}`, auth)))
+							ctx.ui.notify(`✓ Deployed & active: ${url}`, "info");
+						else
+							ctx.ui.notify(
+								`Deployed ${url} but not saved — run /bansos use ${url} once the state file is writable`,
+								"warning",
+							);
+					} else {
+						const url = await deployVercelRelay(token, name, (m) =>
+							ctx.ui.notify(m, "info"),
+						);
+						if (commit((s) => setRelay(s, true, url, `deployed ${name}`)))
+							ctx.ui.notify(`✓ Deployed & active: ${url}`, "info");
+						else
+							ctx.ui.notify(
+								`Deployed ${url} but not saved — run /bansos use ${url} once the state file is writable`,
+								"warning",
+							);
+					}
 				} catch (e) {
 					renderStatus(ctx.ui);
 					ctx.ui.notify(`Deploy failed: ${(e as Error).message}`, "error");
@@ -1899,7 +2103,7 @@ export default async function (pi: ExtensionAPI) {
 				)
 					flash();
 			} else if (sub === "deploy") {
-				await doDeploy();
+				await doDeploy(rest || undefined);
 			} else {
 				const statusBarItem =
 					relayState.statusBar === "shown"
@@ -1912,7 +2116,7 @@ export default async function (pi: ExtensionAPI) {
 					"Switch relay…",
 					"Remove relay…",
 					"Set URL",
-					"Deploy Vercel relay…",
+					"Deploy relay… (Cloudflare / Vercel)",
 					"List saved relays",
 					statusBarItem,
 				]);
@@ -1946,7 +2150,7 @@ export default async function (pi: ExtensionAPI) {
 						)
 					)
 						flash();
-				} else if (choice === "Deploy Vercel relay…") {
+				} else if (choice === "Deploy relay… (Cloudflare / Vercel)") {
 					await doDeploy();
 				} else if (choice === "List saved relays") {
 					showList();

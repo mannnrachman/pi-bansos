@@ -22,70 +22,61 @@ Free model provider for **[pi](https://pi.dev)** ([browse packages](https://pi.d
 ## Features
 
 - **Zero cost** — all models free, no API key needed for supported upstreams
-- **32 models from 2 sources** — 16 OpenCode Zen + 16 KiloCode gateway
+- **25 models from 2 sources** — 11 OpenCode Zen + 14 KiloCode gateway
 - **Instant startup** — the model catalog is cached locally and registered without waiting on upstream; it refreshes in the background
 - **Auto health-check** — only catalog-listed models registered; dead ones skipped silently
 - **Local-only proxy** — binds to `127.0.0.1`, nothing exposed externally; one proxy per loaded extension, shared by every session that uses it (including OMP's in-process subagents)
-- **Optional relay egress with automatic failover** — route through a Vercel relay to dodge per-IP rate limits; a 429/unreachable relay cools down (escalating backoff) and the request rolls to the next healthy relay or goes direct — toggled live via `/bansos`
+- **Optional relay egress with automatic failover** — route through a **Cloudflare Workers** (one command, free, no card) or Vercel relay to dodge per-IP rate limits; a 429/403/unreachable relay cools down (escalating backoff) and the request rolls to the next healthy relay or goes direct — toggled live via `/bansos`
 - **OpenCode free-tier fingerprint kept current** — auto-tracks the live `opencode-ai` UA version, generates spec-correct session/request IDs (verified against opencode's own `Identifier`), and ships the tool-pair payload the 1.19.0 gate expects
 - **Auto port bump** — if port 18080 is taken, automatically tries the next one (up to 18100)
 
 ## Models
 
-**32 curated total: 16 OpenCode + 16 KiloCode.** All models are free. The provider is one `bansos` entry, but model names show their upstream: **OpenCode** or **KiloCode**. The startup check only verifies catalog membership; upstream access can still change between startup and a request.
+**25 curated total: 11 OpenCode + 14 KiloCode.** All models are free. The provider is one `bansos` entry, but model names show their upstream: **OpenCode** or **KiloCode**. The startup check only verifies catalog membership; upstream access can still change between startup and a request.
 
-### OpenCode Zen (16 models)
+### OpenCode Zen (11 models)
 
-| Model ID                          | Name                        | Vision | API       | Context     | Max Output  | Reasoning |
-| --------------------------------- | --------------------------- | ------ | --------- | ----------- | ----------- | --------- |
-| `muse-spark-1.3-contributor-free` | Muse Spark 1.3 Free         | ✅      | responses | 1M tokens   | 131K tokens | ✅         |
-| `muse-spark-1.2-contributor-free` | Muse Spark 1.2 Free         | ✅      | responses | 1M tokens   | 131K tokens | ✅         |
-| `step-5-preview-free`             | Step 5 Preview Free         | ❌      | chat      | 262K tokens | 65K tokens  | ✅         |
-| `mimo-v2.6-flash-free`            | MiMo V2.6 Flash Free        | ✅      | chat      | 200K tokens | 32K tokens  | ✅         |
-| `space-bunny-free`                | Space Bunny                 | ✅      | chat      | 1M tokens   | 524K tokens | ✅         |
-| `ling-3.1-flash-free`             | Ling 3.1 Flash Free         | ❌      | chat      | 262K tokens | 32K tokens  | ✅         |
-| `longcat-2.5-preview-free`        | LongCat 2.5 Preview         | ❌      | chat      | 1M tokens   | 131K tokens | ✅         |
-| `ling-3.0-flash-fin-free`         | Ling 3.0 Flash Fin Free     | ❌      | chat      | 262K tokens | 32K tokens  | ✅         |
-| `nemotron-3-ultra-free`           | Nemotron 3 Ultra Free       | ❌      | chat      | 1M tokens   | 128K tokens | ✅         |
-| `nemotron-3.5-lightning-free`     | Nemotron 3.5 Lightning Free | ❌      | chat      | 262K tokens | 262K tokens | ✅         |
-| `big-pickle`                      | Big Pickle                  | ❌      | chat      | 200K tokens | 32K tokens  | ✅         |
-| `deepseek-v4.1-flash-free`        | DeepSeek V4.1 Flash Free    | ✅      | chat      | 200K tokens | 32K tokens  | ✅         |
-| `glm-5.3-flash-free`              | GLM 5.3 Flash Free          | ✅      | chat      | 200K tokens | 32K tokens  | ✅         |
-| `cat-jam-free`                    | Cat Jam Free                | ❌      | chat      | 1M tokens   | 131K tokens | ✅         |
-| `ll-alpha-free`                   | LL Alpha Free               | ❌      | chat      | 262K tokens | 65K tokens  | ✅         |
-| `nemotron-3.5-super-vl-free`      | Nemotron 3.5 Super VL Free  | ✅      | chat      | 1M tokens   | 131K tokens | ✅         |
+| Model ID                      | Name                        | Vision | API  | Context     | Max Output  | Reasoning |
+| ----------------------------- | --------------------------- | ------ | ---- | ----------- | ----------- | --------- |
+| `beam-free`                   | Beam Free                   | ❌     | chat | 262K tokens | 65K tokens  | ✅        |
+| `minimax-m3.1-flash-free`     | MiniMax M3.1 Flash Free     | ✅     | chat | 1M tokens   | 524K tokens | ✅        |
+| `mimo-v2.6-flash-free`        | MiMo V2.6 Flash Free        | ✅     | chat | 200K tokens | 32K tokens  | ✅        |
+| `nemotron-3-ultra-free`       | Nemotron 3 Ultra Free       | ❌     | chat | 1M tokens   | 128K tokens | ✅        |
+| `nemotron-3.5-lightning-free` | Nemotron 3.5 Lightning Free | ❌     | chat | 262K tokens | 262K tokens | ✅        |
+| `big-pickle`                  | Big Pickle                  | ❌     | chat | 200K tokens | 32K tokens  | ✅        |
+| `longcat-2.5-preview-free`    | LongCat 2.5 Preview         | ❌     | chat | 1M tokens   | 131K tokens | ✅        |
+| `deepseek-v4.1-flash-free`    | DeepSeek V4.1 Flash Free    | ✅     | chat | 200K tokens | 32K tokens  | ✅        |
+| `glm-5.3-flash-free`          | GLM 5.3 Flash Free          | ✅     | chat | 200K tokens | 32K tokens  | ✅        |
+| `cat-jam-free`                | Cat Jam Free                | ❌     | chat | 1M tokens   | 131K tokens | ✅        |
+| `nemotron-3.5-super-vl-free`  | Nemotron 3.5 Super VL Free  | ✅     | chat | 1M tokens   | 131K tokens | ✅        |
 
 
-`step-5-preview-free` is upstream-flaky: occasional 502 "Endpoint is unavailable" between healthy calls — retry.
+**Sweep 2026-10-20** (live probe, full fingerprint, of every registered id): upstream **deprecated** muse-spark-1.3/1.2, space-bunny and ll-alpha (`410` — space-bunny's deprecation notice itself names `minimax-m3.1-flash-free` as the replacement, registered here), and **removed** step-5-preview + ling-3.0/3.1 (`400` upstream-unavailable). `beam-free` and `minimax-m3.1-flash-free` are catalog-listed but **not yet chat-verified**: our probe IP currently hits OpenCode's new IP-level block (403 *"we've detected abusive traffic from this IP address"* — a different gate from `FreeTierError`), so their first verified chat needs a relay egress ([`/bansos deploy`](#bansos-deploy--one-command-relay)). The fingerprint itself passes the gate — the `410`/`400` verdicts above prove the requests reached the model layer.
 
-**Muse note:** Muse uses OpenAI Responses (`/v1/responses`), while the other OpenCode models use Chat Completions (`/v1/chat/completions`). pi-bansos selects the API per model and suppresses Muse's unsupported `reasoning.effort: "none"` value when reasoning is off.
+**Muse note:** the muse-class models are 410-deprecated for now, but their Responses-API routing (`/v1/responses`) stays in place — if a muse-class id returns to the catalog it re-routes automatically, no code change needed.
 
-Manual check: select `OpenCode · Muse Spark 1.3 Free` in `/model`, then ask it to `Reply with exactly OK.`
-
-### KiloCode Gateway (16 models)
+### KiloCode Gateway (14 models)
 
 Keyless — 200 requests/hour per IP. No `Authorization` header is sent; the free gateway rejects placeholder tokens.
 
 | Model ID                                             | Name                             | Vision | Context     | Max Output  | Reasoning |
 | ---------------------------------------------------- | -------------------------------- | ------ | ----------- | ----------- | --------- |
 | `kilo-auto/free`                                     | Kilo Auto Free                   | ❌      | 256K tokens | 10K tokens  | ❌         |
+| `minimax/minimax-m3.1-flash:free`                    | MiniMax M3.1 Flash Free          | ✅      | 1M tokens   | 524K tokens | ✅         |
+| `xingchen-agi/xing4.0-29b-a4b:free`                  | Xing 4.0 29B A4B Free            | ❌      | 262K tokens | 236K tokens | ✅         |
 | `nvidia/nemotron-3-ultra-550b-a55b:free`             | Nemotron 3 Ultra Free            | ❌      | 1M tokens   | 65K tokens  | ✅         |
 | `nvidia/nemotron-3-super-120b-a12b:free`             | Nemotron 3 Super Free            | ❌      | 262K tokens | 236K tokens | ✅         |
 | `dots-studio/dots-3-note-preview:free`               | Dots3-Note Preview Free          | ✅      | 512K tokens | 460K tokens | ✅         |
 | `cohere/north-mini-code:free`                        | North Mini Code Free             | ❌      | 256K tokens | 64K tokens  | ❌         |
-| `poolside/laguna-xs-2.1:free`                        | Laguna XS 2.1 Free               | ❌      | 262K tokens | 32K tokens  | ✅         |
 | `nvidia/nemotron-3-nano-omni-30b-a3b-reasoning:free` | Nemotron 3 Nano Omni Free        | ✅      | 256K tokens | 65K tokens  | ✅         |
 | `openrouter/free`                                    | OpenRouter Free (auto)           | ✅      | 200K tokens | 65K tokens  | ❌         |
 | `nvidia/nemotron-3.5-lightning:free`                 | Nemotron 3.5 Lightning Free      | ❌      | 1M tokens   | 65K tokens  | ✅         |
 | `nvidia/nemotron-3.5-content-safety:free`            | Nemotron 3.5 Content Safety Free | ✅      | 128K tokens | 8K tokens   | ✅         |
-| `liquid/lfm-2.5-2.6b:free`                           | Liquid LFM 2.5 2.6B Free         | ❌      | 65K tokens  | 8K tokens   | ✅         |
 | `poolside/laguna-s-2.1:free`                         | Laguna S 2.1 Free                | ❌      | 262K tokens | 32K tokens  | ✅         |
 | `thinkingmachines/inkling-small:free`                | Inkling Small Free               | ✅      | 1M tokens   | 262K tokens | ✅         |
 | `nvidia/nemotron-3.5-super-vl:free`                  | Nemotron 3.5 Super VL Free       | ✅      | 1M tokens   | 131K tokens | ✅         |
-| `stealth/glyph-cluster`                              | Glyph Cluster Free               | ❌      | 256K tokens | 256K tokens | ✅         |
-| `stealth/cat-jam`                                    | Cat Jam Free                     | ❌      | 1M tokens   | 131K tokens | ✅         |
 
-New additions were chat-tested on 2026-10-16. Glyph Cluster returned a transient 503 on the first call, then answered `OK` on retry. Kilo's stealth models and NVIDIA free endpoints may retain prompts or use them for training; do not send confidential data.
+**Sweep 2026-10-20**: added `minimax/minimax-m3.1-flash:free` (chat 200) and `xingchen-agi/xing4.0-29b-a4b:free` (chat 200 — its Phala shared pool occasionally 429s under load; retry). Removed `stealth/glyph-cluster` and `stealth/cat-jam` (the stealth lane now answers `401 You need to sign in to use this model`), `poolside/laguna-xs-2.1:free` (consistent 429 shared-pool) and `liquid/lfm-2.5-2.6b:free` (consistent upstream 504). `thinkingmachines/inkling-small:free` stays: healthy apart from its own provider-side daily cap. Kilo's NVIDIA free endpoints may retain prompts or use them for training; do not send confidential data.
 
 
 `openrouter/free` is **pinned**: it no longer appears in the `/models` catalog, but chat completions still serve it — so it stays registered.
@@ -200,7 +191,7 @@ Run `/bansos` any time:
 | `/bansos use <URL>`           | Switch to a relay and enable it (added to saved list)                        |
 | `/bansos list`                | Show all saved relays (★ = active)                                           |
 | `/bansos remove <URL>`        | Forget a saved relay (the active one can't be removed)                       |
-| `/bansos deploy`              | **Deploy a fresh Vercel relay** and switch to it                             |
+| `/bansos deploy`              | **Deploy a fresh relay** (Cloudflare Workers or Vercel) and switch to it      |
 | `/bansos hide` / `/bansos show` | Hide or show the `bansos` status-bar entry (default: shown)                |
 | `/bansos refresh-models`      | Force a model-catalog re-fetch (warns when it fails; list may be stale)      |
 
@@ -223,19 +214,37 @@ The relay on/off switch, the saved relay list, and the status-bar preference liv
 ```text
 /bansos list
   Saved relays (2):
-  ★ https://pi-bansos-relay-xxxx.vercel.app   [deployed relay-2026]
-    https://vercel-relay-yyyy.vercel.app       [manual]
+  ★ https://relay-2026.your-subdomain.workers.dev  [deployed relay-2026]
+    https://vercel-relay-yyyy.vercel.app            [manual]
 
 /bansos            → Switch relay… → pick one → active (live, no restart)
 /bansos use https://vercel-relay-yyyy.vercel.app   # or switch directly
 ```
 
-### `/bansos deploy` — one-command Vercel relay
+### `/bansos deploy` — one-command relay (Cloudflare or Vercel)
 
-Deploys your own Node.js relay to Vercel and activates it immediately. It asks for a **Vercel API token** (get one at [https://vercel.com/account/tokens](https://vercel.com/account/tokens)) and an optional project name, then uploads a tiny worker and waits for it to go live (~10–40 s). The new relay URL is saved and switched on; the token is used once and **never stored**.
+Deploys your own relay and activates it immediately. Pick a platform, paste an API token (used once, **never stored**), optionally name the project — the relay URL is saved and switched on when it goes live.
+
+**Cloudflare Workers (recommended)** — free plan, no credit card, 100 K requests/day (one LLM turn = one relay request, so the daily ceiling is ~20–50× a heavy agentic day). Get a token at [dash.cloudflare.com](https://dash.cloudflare.com) → My Profile → API Tokens → *Create Token* → **Edit Cloudflare Workers** template (or a custom token with Workers Scripts **Edit** + Account Settings **Read**). A free Cloudflare account is enough.
 
 ```text
 /bansos deploy
+  Deploy relay to: Cloudflare Workers (recommended — free, IP diversity)
+  Cloudflare API token: <paste>
+  Project name (empty = auto):  relay-2026
+  Resolving Cloudflare account…
+  Uploading relay worker to Cloudflare…
+  Reading workers.dev routing…
+  ✓ Deployed & active: https://relay-2026.<your-subdomain>.workers.dev
+```
+
+The generated worker is **hardened**: it embeds a random 32-byte secret minted per deployment and answers `401` to any request without the matching `x-relay-auth` header (pi-bansos sends it automatically for relays it deployed), forwards only to the pi-bansos upstreams (`https://opencode.ai`, `https://api.kilo.ai`) with private-host and path checks, and caps request size at 32 MB. Deploy design adapted from [trefeon/pi-freeflow](https://github.com/trefeon/pi-freeflow) (MIT).
+
+**Vercel** — needs a Vercel account and token ([vercel.com/account/tokens](https://vercel.com/account/tokens)); Hobby plans cap fast-origin bandwidth (~10 GB), after which deployments return HTTP 402, so treat it as fallback.
+
+```text
+/bansos deploy
+  Deploy relay to: Vercel (needs an account; Hobby caps bandwidth)
   Vercel API token (vercel-…): <paste>
   Project name (empty = auto):  relay-2026
   Uploading relay to Vercel…
@@ -243,9 +252,7 @@ Deploys your own Node.js relay to Vercel and activates it immediately. It asks f
   ✓ Deployed & active: https://relay-2026-xxx.vercel.app
 ```
 
-> The Vercel relay masks your IP behind Vercel's dynamic edge IPs. Free tier: 100 GB bandwidth + 500 K invocations/month. Deploy on multiple accounts for more IP diversity. The token input has no hidden/secret mode in the TUI, so it shows while typing — paste, deploy, done.
-
-> A relay is a single fixed exit IP, not rotation. Useful when your IP is limited; otherwise it just adds a small hop.
+> Both relays mask your IP behind the platform's edge IPs. Useful when your IP is rate-limited or flagged (OpenCode's newer 403 *"abusive traffic from this IP"* block is IP-level and passes with a different egress). If a relay's own egress gets flagged, pi-bansos cools it down (90 s, escalating) and rolls to the next healthy relay or goes direct. A relay is one fixed exit, not rotation — for more egress diversity deploy several and keep them in the saved list. The token input has no hidden/secret mode in the TUI, so it shows while typing — paste, deploy, done.
 
 ## Data files
 
@@ -258,7 +265,7 @@ pi-bansos writes two files into the **agent directory of the host that loaded it
 
 | File                        | Purpose                                                                        |
 | --------------------------- | ------------------------------------------------------------------------------ |
-| `pi-bansos-relay-state.json` | Relay on/off, saved relays, active relay, status-bar preference               |
+| `pi-bansos-relay-state.json` | Relay on/off, saved relays (incl. per-relay auth secrets), active relay, status-bar preference |
 | `bansos-models.json`        | Cached upstream model catalog for instant startup, refreshed in background     |
 
 Both live outside the package directory, so npm updates never wipe them. The host is detected from the extension's real install path, with a process-name fallback for symlinked installs (e.g. an OMP npm plugin symlinked into a repo checkout). If you use pi and OMP side by side, each has its own relay settings and catalog cache — deleting one leaves the other untouched.
