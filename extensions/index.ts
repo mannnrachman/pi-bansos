@@ -12,6 +12,12 @@ import path from "node:path";
 import { Readable } from "node:stream";
 import { StringDecoder } from "node:string_decoder";
 import { fileURLToPath } from "node:url";
+import {
+	classifyUpstreamError,
+	retryAfterSeconds,
+	UpstreamHealth,
+	type UpstreamErrorKind,
+} from "./upstream-health";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 
 // ── Configuration ──────────────────────────────────────────────────
@@ -528,6 +534,7 @@ async function relayFetch(
 			const relayAuth = relayState.relays.find((r) => r.url === relay)?.auth;
 			if (relayAuth) headers.set("x-relay-auth", relayAuth);
 			const res = await fetch(relay, { ...opts, headers });
+			responseVia.set(res, relay);
 			// 401 from a hardened worker = auth mismatch; distinct from the
 			// upstream's own 401 (which reaches us as a 401 relay RESPONSE
 			// body passthrough — but a bare 401 from the worker itself means
@@ -1156,7 +1163,10 @@ function rateLimitKey(upstream: Upstream, ip: string, now: number): string {
 // unconstrained and model config stays accurate.
 const RELAY_MAX_TOKENS = 131_072;
 
-function checkRateLimit(ip: string, upstream: Upstream): boolean {
+function checkRateLimit(
+	ip: string,
+	upstream: Upstream,
+): { ok: true } | { ok: false; retryAfterSec: number } {
 	const now = Date.now();
 	const key = rateLimitKey(upstream, ip, now);
 	const entry = rateLimitMap.get(key);
@@ -1165,11 +1175,73 @@ function checkRateLimit(ip: string, upstream: Upstream): boolean {
 			count: 1,
 			resetAt: rateLimitResetAt(upstream, now),
 		});
-		return true;
+		return { ok: true };
 	}
-	if (entry.count >= RATE_LIMIT_MAX[upstream]) return false;
+	if (entry.count >= RATE_LIMIT_MAX[upstream]) {
+		return {
+			ok: false,
+			retryAfterSec: Math.max(1, Math.ceil((entry.resetAt - now) / 1000)),
+		};
+	}
 	entry.count++;
-	return true;
+	return { ok: true };
+}
+
+// ── Upstream health (reactive 429/403 cooldowns) ──────────────────
+// Mirrors what the upstream itself reported — distinct from the local guard
+// above (our own flood numbers) and from relay cooldowns (per-relay egress).
+// Free-tier errors are two unrelated axes (live-captured bodies 2026-10,
+// anomalyco/opencode #55816/#56719):
+// - 429 FreeUsageLimitError / "Rate limit exceeded" → QUOTA. Limits are
+//   dynamic, deliberately unpublished, metered per model AND per network
+//   (shared/CGNAT IPs get flagged by other users), so cooldowns are per
+//   upstream+model and honor Retry-After when sent.
+// - 403 "abusive traffic from this IP address" → EGRESS IP flagged. Backoff
+//   cannot fix it; the fail-fast body says to switch egress (/bansos deploy).
+// - 403 FreeTierError "within OpenCode" → SHAPE GATE: deterministic
+//   fingerprint rejection, identical on every egress — no cooldown, surfaced
+//   as-is (if this fires our fingerprint broke, not a rate).
+const upstreamHealth = new UpstreamHealth();
+/** Which egress produced a relayFetch Response: absent = direct. */
+const responseVia = new WeakMap<Response, string>();
+function noteUpstreamResponse(
+	upstream: Upstream,
+	model: string,
+	status: number,
+	body: string,
+	retryAfter: string | null | undefined,
+	via: string,
+): UpstreamErrorKind {
+	const kind = classifyUpstreamError(status, body);
+	if (kind === "quota") {
+		// Quota buckets are per egress. A 429 that survived relayFetch's
+		// rolling arrived from the direct fallback, so only direct answers
+		// cool the model — a healthy relay may hold its own budget.
+		if (via === "direct") {
+			upstreamHealth.recordQuotaFailure(
+				upstream,
+				model,
+				retryAfterSeconds(retryAfter),
+			);
+		}
+	} else if (kind === "ip-flagged") {
+		if (via === "direct") upstreamHealth.recordEgressFailure(upstream);
+	} else if (kind === "shape-gate") {
+		log("error", "opencode shape gate rejected the fingerprint", {
+			status,
+			hint: "upstream gate changed — fingerprint needs updating",
+		});
+	}
+	if (kind !== "other") {
+		log("warn", "upstream error triaged", {
+			upstream,
+			model,
+			status,
+			kind,
+			via,
+		});
+	}
+	return kind;
 }
 
 // ── Health Check (OpenCode/Kilo catalogs; no per-model inference) ──
@@ -1437,10 +1509,47 @@ function startProxy(
 			} catch {}
 
 			const upstream: Upstream = isKilo ? "kilo" : "opencode";
-			if (!checkRateLimit(clientIP, upstream)) {
+			const model =
+				typeof parsedBody?.model === "string" ? parsedBody.model : "";
+			const limit = checkRateLimit(clientIP, upstream);
+			if (!limit.ok) {
 				log("warn", "rate limit exceeded", { ip: clientIP, upstream });
-				res.writeHead(429, { "content-type": "application/json" });
-				res.end(JSON.stringify({ error: `${upstream} rate limit exceeded` }));
+				res.writeHead(429, {
+					"content-type": "application/json",
+					"retry-after": String(limit.retryAfterSec),
+				});
+				res.end(
+					JSON.stringify({
+						error: `${upstream} rate limit exceeded`,
+						retry_after_secs: limit.retryAfterSec,
+					}),
+				);
+				return;
+			}
+			// Reactive upstream cooldowns: fail fast with a precise reason
+			// instead of replaying the same refusal to the upstream. An
+			// egress IP flag is skipped while a relay is active — the relay
+			// is a different egress and may still be clean (relayFetch runs
+			// its own failover). Quota cooldowns are per model, so other
+			// models keep flowing.
+			const cooldown = upstreamHealth.cooldown(upstream, model);
+			const relayActive = relayState.enabled && relayState.url !== "";
+			if (cooldown && !(cooldown.kind === "ip-flagged" && relayActive)) {
+				const wait = Math.max(
+					1,
+					Math.ceil((cooldown.until - Date.now()) / 1000),
+				);
+				const message =
+					cooldown.kind === "quota"
+						? `${model || upstream}: upstream free-quota cooldown (429); retry in ${wait}s`
+						: `${upstream}: this network's IP is flagged by the upstream (403); ${relayActive ? `retry in ${wait}s` : `switch egress via /bansos deploy, or retry in ${wait}s`}`;
+				res.writeHead(cooldown.kind === "quota" ? 429 : 503, {
+					"content-type": "application/json",
+					"retry-after": String(wait),
+				});
+				res.end(
+					JSON.stringify({ error: message, retry_after_secs: wait }),
+				);
 				return;
 			}
 
@@ -1456,6 +1565,27 @@ function startProxy(
 						body: JSON.stringify(parsedBody),
 						signal: AbortSignal.timeout(300_000),
 					});
+					if (response.status === 429 || response.status === 403) {
+						const text = await response.text().catch(() => "");
+						noteUpstreamResponse(
+							upstream,
+							model,
+							response.status,
+							text,
+							response.headers.get("retry-after"),
+							responseVia.get(response) ?? "direct",
+						);
+						const errHeaders: Record<string, string> = {
+							"content-type":
+								response.headers.get("content-type") || "application/json",
+						};
+						const ra = response.headers.get("retry-after");
+						if (ra) errHeaders["retry-after"] = ra;
+						res.writeHead(response.status, errHeaders);
+						res.end(text);
+						return;
+					}
+					if (response.ok) upstreamHealth.recordSuccess(upstream, model);
 					if (isStream && response.body) {
 						const ct =
 							response.headers.get("content-type") || "text/event-stream";
@@ -1539,6 +1669,31 @@ function startProxy(
 								body: opencodeBody.length ? opencodeBody : undefined,
 								signal: AbortSignal.timeout(300_000),
 							});
+							if (response.status === 429 || response.status === 403) {
+								const text = await response.text().catch(() => "");
+								noteUpstreamResponse(
+									upstream,
+									model,
+									response.status,
+									text,
+									response.headers.get("retry-after"),
+									responseVia.get(response) ?? "direct",
+								);
+								const errHeaders: Record<string, string> = {
+									"content-type":
+										response.headers.get("content-type") || "application/json",
+									"cache-control": "no-cache",
+									"x-accel-buffering": "no",
+								};
+								const ra = response.headers.get("retry-after");
+								if (ra) errHeaders["retry-after"] = ra;
+								res.writeHead(response.status, errHeaders);
+								res.end(text);
+								return; // relay handled the response
+							}
+							if (response.ok) {
+								upstreamHealth.recordSuccess(upstream, model);
+							}
 							const ct =
 								response.headers.get("content-type") || "application/json";
 							if (response.body) {
@@ -1587,23 +1742,62 @@ function startProxy(
 							path: directPath,
 							headers: fwd,
 						},
-						(upstream) => {
-							const outHeaders: Record<string, string> = {};
-							for (const h of [
-								"content-type",
-								"cache-control",
-								"x-request-id",
-							]) {
-								const val = upstream.headers[h];
-								if (typeof val === "string") outHeaders[h] = val;
-							}
+					(upstreamRes) => {
+						const status = upstreamRes.statusCode ?? 502;
+						// Triage 429/403 before piping: quota/IP-flag bodies are
+						// small JSON, and buffering them records reactive cooldowns
+						// and forwards Retry-After instead of streaming a refusal
+						// the session would read as a model outage.
+						if (status === 429 || status === 403) {
+							const chunks: Buffer[] = [];
+							upstreamRes.on("data", (c: Buffer) => chunks.push(c));
+							upstreamRes.on("end", () => {
+								const text = Buffer.concat(chunks).toString("utf8");
+								noteUpstreamResponse(
+									"opencode",
+									model,
+									status,
+									text,
+									typeof upstreamRes.headers["retry-after"] === "string"
+										? (upstreamRes.headers["retry-after"] as string)
+										: null,
+									"direct",
+								);
+								if (res.headersSent) return;
+								const outHeaders: Record<string, string> = {
+									"content-type":
+										(upstreamRes.headers["content-type"] as string) ||
+										"application/json",
+									"x-content-type-options": "nosniff",
+								};
+								if (typeof upstreamRes.headers["retry-after"] === "string") {
+									outHeaders["retry-after"] =
+										upstreamRes.headers["retry-after"] as string;
+								}
+								res.writeHead(status, outHeaders);
+								res.end(text);
+							});
+							return;
+						}
+						if (status >= 200 && status < 300) {
+							upstreamHealth.recordSuccess("opencode", model);
+						}
+						const outHeaders: Record<string, string> = {};
+						for (const h of [
+							"content-type",
+							"cache-control",
+							"x-request-id",
+						]) {
+							const val = upstreamRes.headers[h];
+							if (typeof val === "string") outHeaders[h] = val;
+						}
 						outHeaders["x-content-type-options"] = "nosniff";
-						res.writeHead(upstream.statusCode ?? 502, outHeaders);
+						res.writeHead(status, outHeaders);
 						// Reuse the same alias-restore pipe as the relay path.
 						// The https response is a Node IncomingMessage (a Readable),
 						// so it drops straight into pipeUpstreamStream.
 						pipeUpstreamStream(
-							upstream as unknown as Readable,
+							upstreamRes as unknown as Readable,
 							res,
 							req,
 							toolAliases,

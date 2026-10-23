@@ -1,5 +1,17 @@
 # Changelog
 
+## [0.7.1] - 2026-10-23
+
+### Added
+- **Upstream 429/403 triage with reactive cooldowns** (`extensions/upstream-health.ts`): upstream refusals are now classified from their bodies instead of streamed to the session as opaque failures. `429 FreeUsageLimitError` / "Rate limit exceeded" = quota → per-model cooldown (90 s base, ×2 escalation, 15 min cap, server `Retry-After` honored and capped at 1 h); `403 "abusive traffic from this IP address"` = egress IP flagged → whole-upstream cooldown (5 min base, escalating) that fails fast with a switch-egress hint while no relay is active; `403 FreeTierError` "within OpenCode" = shape gate → surfaced as-is with an error log (deterministic — every retry fails identically, so no cooldown). Requests during a cooldown fail fast (429/503 + `Retry-After`) with the reason spelled out, instead of replaying the same refusal to the upstream. Previously a direct-mode 429 was piped straight through with no backoff and no distinction between "model out of quota" and "this IP is flagged".
+- Research basis: OpenCode's free limits are dynamic, deliberately unpublished, and metered per account/workspace/network ([#55816](https://github.com/anomalyco/opencode/issues/55816), [#56719](https://github.com/anomalyco/opencode/issues/56719) — shared/CGNAT IPs get flagged because of other users); error-axis taxonomy live-verified by the community ([opencode-unlimited-proxy docs](https://github.com/ebouther/opencode-unlimited-proxy/blob/main/docs/free-tier-gates.md), [9router #4983](https://github.com/decolua/9router/issues/4983)). Live smoke on 2026-10-23: real `429 FreeUsageLimitError` (upstream `Retry-After: 45918`) → next request fail-fasted locally with the cooldown reason and `retry-after: 3600`, zero upstream hits.
+
+### Changed
+- Local-guard 429s now carry a `Retry-After` header and `retry_after_secs` in the body so clients back off to the real reset instead of polling.
+- Quota cooldowns are recorded only from direct-egress answers: a 429 that survived relay rolling arrived via the direct fallback, and a healthy relay may hold its own per-IP budget. The egress IP-flag fail-fast is skipped while a relay is active (the relay is a different egress; `relayFetch` runs its own failover).
+- 2xx answers clear both the model's quota cooldown and the egress flag (`recordSuccess`).
+- Tests: `tests/upstream-health.test.ts` (classification from real captured bodies, `Retry-After` parsing incl. HTTP-date + clamp, per-model isolation, escalation, egress-wins-over-quota, success reset). Suite: 15/15.
+
 ## [0.7.0] - 2026-10-20
 
 ### Added

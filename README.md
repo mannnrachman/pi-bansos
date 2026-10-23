@@ -28,6 +28,7 @@ Free model provider for **[pi](https://pi.dev)** ([browse packages](https://pi.d
 - **Local-only proxy** — binds to `127.0.0.1`, nothing exposed externally; one proxy per loaded extension, shared by every session that uses it (including OMP's in-process subagents)
 - **Optional relay egress with automatic failover** — route through a **Cloudflare Workers** (one command, free, no card) or Vercel relay to dodge per-IP rate limits; a 429/403/unreachable relay cools down (escalating backoff) and the request rolls to the next healthy relay or goes direct — toggled live via `/bansos`
 - **OpenCode free-tier fingerprint kept current** — auto-tracks the live `opencode-ai` UA version, generates spec-correct session/request IDs (verified against opencode's own `Identifier`), and ships the tool-pair payload the 1.19.0 gate expects
+- **Upstream 429/403 triage with reactive cooldowns** — free-tier refusals are classified live: a quota `429 FreeUsageLimitError` cools just that model (90 s base, escalating, upstream `Retry-After` honored), an IP-flag `403 "abusive traffic"` fails fast with a switch-egress hint instead of hammering a network no backoff can fix, and a fingerprint-gate `403` is surfaced as-is. The session gets a precise reason + `Retry-After` instead of a raw refusal replay.
 - **Auto port bump** — if port 18080 is taken, automatically tries the next one (up to 18100)
 
 ## Models
@@ -176,6 +177,7 @@ pi   # or: omp
 ```
 
 Startup is silent and instant: the model list comes from the local catalog cache (see [Data files](#data-files)), so nothing blocks on the network. The TUI status bar shows `relay: ON`/`OFF`, or `bansos: proxy down` / `bansos: no models` when startup failed; `/bansos status` gives the details (proxy address or bind error, models found at startup). Hide or show the status-bar entry with `/bansos hide` / `/bansos show`.
+Rate-limit answers are precise: during a model's quota cooldown or a network IP-flag the proxy fails fast with `Retry-After` and the reason in the body (see [Notes](#notes)) instead of replaying the refusal to the upstream.
 
 ### Commands
 
@@ -275,6 +277,8 @@ Both live outside the package directory, so npm updates never wipe them. The hos
 - Free upstream models are best-effort: promos can expire, model IDs can change, and rate limits may apply
 - pi-bansos health-checks against the cached/live catalog at startup so unavailable models are skipped instead of registered
 - KiloCode gateway: 200 req/hr per IP, keyless
+- Upstream refusals are triaged, not replayed: a quota `429 FreeUsageLimitError` cools **just that model** (90 s base, escalating; upstream `Retry-After` honored, capped 1 h), an IP-flag `403 "abusive traffic from this IP address"` fails fast with a switch-egress hint (`/bansos deploy`) while no relay is active, and a fingerprint-gate `403 FreeTierError` is surfaced as-is. Any 2xx clears the cooldowns
+- OpenCode's free limits are dynamic and metered per account/workspace/network — a shared or CGNAT IP can be flagged because of *other* users, so a 429 with zero personal usage is usually the network bucket, not the model
 - Catalog specs (context, max output, modalities) come from the curated model lists in the extension; the cache only stores which IDs are alive
 
 ## Uninstall
