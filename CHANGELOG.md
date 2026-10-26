@@ -1,5 +1,16 @@
 # Changelog
 
+## [0.7.2] - 2026-10-26
+
+### Added
+- **`<env>` fingerprint marker** (9router [#5222](https://github.com/decolua/9router/pull/5222), live-bisected): the free-tier gate requires the CLI's `<env>` environment block in the system content — a foreign prompt without it answers `429 FreeUsageLimitError` regardless of headers/UA/session, i.e. it masquerades as a quota error. pi-bansos now appends the block to the effective system prompt on both the chat and responses lanes; a prompt already carrying `<env>` passes through untouched. Canonical Linux `shell` wording stays (upstream also accepts the platform variants, 9router #5157).
+- **Session freshness**: upstream decodes the `ses_` timestamp and 429s sessions older than ~30 days (-34d → 200, -100d → 429, same PR). A long-lived pi/OMP process now re-mints its session weekly (`SESSION_MAX_AGE_MS = 7d`), keeping prompt-cache affinity inside the window.
+- **Model sweep 2026-10-26** (live catalogs + probes): OpenCode catalog dropped `minimax-m3.1-flash-free`, `nemotron-3-ultra-free`, `longcat-2.5-preview-free`, `cat-jam-free`; added `flint-40b-free` (catalog-listed, not yet chat-verified — probe IP quota-held). KiloCode added `recursive/flint-v1.0:free` (chat 200, 262K text-only); dropped `minimax/minimax-m3.1-flash:free` (404) and `thinkingmachines/inkling-small:free` (404). `liquid/lfm-2.5-2.6b:free` and `poolside/laguna-xs-2.1:free` are back in the catalog but still 429 on probe — stay dropped. Catalog: 25 → 21 (8 OpenCode + 13 KiloCode).
+
+### Changed
+- `deepseek-v4.1-flash-free` context window 200K → 320K (measured ~330k reject ceiling, 9router [#5179](https://github.com/decolua/9router/pull/5179)).
+- Tests: catalog suite asserts the 2026-10-26 lists; new `tests/opencode-env.test.ts` covers `<env>` injection (append/unshift/block-array/responses/passthrough). Suite: 20/20.
+
 ## [0.7.1] - 2026-10-23
 
 ### Added

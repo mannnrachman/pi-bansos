@@ -7,7 +7,7 @@ import { randomBytes } from "node:crypto";
 import fs from "node:fs";
 import http from "node:http";
 import https from "node:https";
-import { homedir } from "node:os";
+import { homedir, tmpdir } from "node:os";
 import path from "node:path";
 import { Readable } from "node:stream";
 import { StringDecoder } from "node:string_decoder";
@@ -149,10 +149,26 @@ function generateRequestId(timestamp = Date.now()): string {
 	return `msg_${timeHexFrom(current)}${unstableRandom()}`;
 }
 
-// One stable session per process — shape must match OPENCODE_SESSION_RE.
-const OPENCODE_SESSION = generateSessionId();
-if (!OPENCODE_SESSION_RE.test(OPENCODE_SESSION)) {
+// One stable session per conversation window — shape must match
+// OPENCODE_SESSION_RE. Upstream decodes the embedded timestamp and 429s
+// sessions older than ~30 days (9router #5222, live-probed: -34d → 200,
+// -100d → 429), so a long-lived pi/OMP process re-mints its session weekly —
+// well inside the window — and keeps prompt-cache affinity the rest of the time.
+const SESSION_MAX_AGE_MS = 7 * 24 * 60 * 60_000;
+let openCodeSession = generateSessionId();
+let openCodeSessionMintedAt = Date.now();
+if (!OPENCODE_SESSION_RE.test(openCodeSession)) {
 	throw new Error("opencode session id generation failed shape check");
+}
+function currentOpenCodeSession(): string {
+	if (Date.now() - openCodeSessionMintedAt > SESSION_MAX_AGE_MS) {
+		const fresh = generateSessionId();
+		if (OPENCODE_SESSION_RE.test(fresh)) {
+			openCodeSession = fresh;
+			openCodeSessionMintedAt = Date.now();
+		}
+	}
+	return openCodeSession;
 }
 
 // Live UA resolution — offline-safe, never throws, never blocks.
@@ -208,10 +224,10 @@ function opencodeHeaders(withRequestHeader = false): Record<string, string> {
 		Authorization: "Bearer public",
 		"x-opencode-client": "desktop",
 		"x-opencode-project": OPENCODE_PROJECT_ID,
-		"x-opencode-session": OPENCODE_SESSION,
+		"x-opencode-session": currentOpenCodeSession(),
 		// v2 gate (2026-10-14): BOTH session headers must be present and equal.
-		"x-opencode-session-id": OPENCODE_SESSION,
-		"x-session-affinity": OPENCODE_SESSION,
+		"x-opencode-session-id": currentOpenCodeSession(),
+		"x-session-affinity": currentOpenCodeSession(),
 		// Distributed-tracing headers real opencode clients emit.
 		b3: `${traceId}-${spanId}-1-${spanId}`,
 		traceparent: `00-${traceId}-${spanId}-01`,
@@ -309,6 +325,81 @@ function sanitizeResponsesItems(body: Record<string, unknown>): void {
 	});
 }
 
+// v2 gate (2026-10-25, 9router #5222): the CLI's <env> environment block must
+// be present in the system content — a foreign prompt without it answers 429
+// FreeUsageLimitError regardless of headers, UA or session. The gate reads
+// text only, so the block is appended to the caller's prompt; a prompt that
+// already carries <env> (a real opencode client) passes through untouched.
+// The shell wording stays canonical Linux — upstream also accepts the
+// platform variants (9router #5157), so one consistent platform story is fine.
+const ENV_FINGERPRINT_NOTE = [
+	"Here is some useful information about the environment you are running in:",
+	"<env>",
+	`  Working directory: ${process.cwd()}`,
+	`  Workspace root folder: ${process.cwd()}`,
+	"  Is directory a git repo: no",
+	`  Platform: ${process.platform}`,
+	`  Prefer ${path.join(tmpdir(), "opencode")} over generic system temporary directories such as /tmp; it is pre-created and approved for external access.`,
+	"</env>",
+].join("\n");
+function systemCarriesEnv(text: unknown): boolean {
+	if (typeof text === "string") return text.includes("<env>");
+	if (Array.isArray(text)) {
+		return text.some(
+			(b) =>
+				b !== null &&
+				typeof b === "object" &&
+				typeof (b as Record<string, unknown>).text === "string" &&
+				((b as Record<string, unknown>).text as string).includes("<env>"),
+		);
+	}
+	return false;
+}
+/** Append the <env> marker to the effective system prompt (chat + responses). */
+function ensureEnvFingerprint(
+	body: Record<string, unknown>,
+	responses: boolean,
+): void {
+	if (responses) {
+		if (systemCarriesEnv(body.instructions)) return;
+		const instructions = body.instructions;
+		body.instructions =
+			typeof instructions === "string" && instructions.trim()
+				? `${instructions}\n\n${ENV_FINGERPRINT_NOTE}`
+				: ENV_FINGERPRINT_NOTE;
+		return;
+	}
+	const messages = body.messages;
+	if (!Array.isArray(messages)) return;
+	const idx = messages.findIndex(
+		(m) =>
+			m !== null &&
+			typeof m === "object" &&
+			(m as Record<string, unknown>).role === "system",
+	);
+	if (idx === -1) {
+		(messages as unknown[]).unshift({
+			role: "system",
+			content: ENV_FINGERPRINT_NOTE,
+		});
+		return;
+	}
+	const target = messages[idx] as Record<string, unknown>;
+	if (systemCarriesEnv(target.content)) return;
+	if (typeof target.content === "string") {
+		target.content = target.content.trim()
+			? `${target.content}\n\n${ENV_FINGERPRINT_NOTE}`
+			: ENV_FINGERPRINT_NOTE;
+	} else if (Array.isArray(target.content)) {
+		(target.content as unknown[]).push({
+			type: "text",
+			text: ENV_FINGERPRINT_NOTE,
+		});
+	} else {
+		target.content = ENV_FINGERPRINT_NOTE;
+	}
+}
+
 /** Rewrite OpenCode free-tier request body to pass Zen client fingerprint gates.
  * Returns the upstream path segment to use ("/inference/v1/responses" for
  * muse-class Responses models, else chat completions under the inbound path). */
@@ -330,9 +421,11 @@ function transformOpencodeBody(
 		body.store = false;
 		ensureResponsesFingerprintTools(body);
 		sanitizeResponsesItems(body);
+		ensureEnvFingerprint(body, true);
 		return { body, responsesPath: true };
 	}
 	ensureChatFingerprintTools(body);
+	ensureEnvFingerprint(body, false);
 	return { body, responsesPath: false };
 }
 
@@ -875,15 +968,16 @@ interface ModelDef {
 }
 
 // OpenCode Zen free models verified against the live catalog and inference APIs.
-// Sweep 2026-10-20: upstream deprecated muse-spark-1.3/1.2, space-bunny (410,
-// "use minimax-m3.1-flash-free instead") and ll-alpha (410); step-5-preview,
-// ling-3.0/3.1 are gone upstream (400 "Model is unavailable"). Added beam-free
-// and minimax-m3.1-flash-free — catalog-listed today but NOT chat-verified:
-// our test IP hit the new IP-level gate (403 "abusive traffic from this IP
-// address", distinct from FreeTierError). Fingerprint itself passes (410/400
-// responses prove the gate let the request through).
-// Previously: 2026-10-16 chat-verified the dropped entries; exo-free (410),
-// jev-1.13-free (protocol unsupported), deepseek-v4-flash-free (400) rejected.
+// Sweep 2026-10-26: the catalog dropped minimax-m3.1-flash-free,
+// nemotron-3-ultra-free, longcat-2.5-preview-free and cat-jam-free (absent
+// from /zen/v1/models). Added flint-40b-free — catalog-listed, NOT yet
+// chat-verified (probe IP is quota-held; upstream Retry-After ~12.7 h).
+// muse-spark-1.2/1.3 and muse-wonder-1.0 are back in the catalog but stay
+// unregistered (muse lane keeps its /responses routing if one returns);
+// jev-1.13-free (protocol unsupported) and `test` stay out too.
+// deepseek-v4.1-flash-free: context 200K → 320K (measured ~330k reject
+// ceiling, 9router #5179). Previously: 2026-10-20 sweep dropped muse-spark,
+// space-bunny, ll-alpha (410), step-5-preview, ling-3.0/3.1 (400).
 const KNOWN_MODELS: ModelDef[] = [
 	{
 		id: "beam-free",
@@ -893,27 +987,12 @@ const KNOWN_MODELS: ModelDef[] = [
 		maxTokens: 65_536,
 	},
 	{
-		id: "minimax-m3.1-flash-free",
-		name: "MiniMax M3.1 Flash Free",
-		reasoning: true,
-		contextWindow: 1_000_000,
-		maxTokens: 524_288,
-		input: ["text", "image"],
-	},
-	{
 		id: "mimo-v2.6-flash-free",
 		name: "MiMo V2.6 Flash Free",
 		reasoning: true,
 		contextWindow: 200_000,
 		maxTokens: 32_000,
 		input: ["text", "image"],
-	},
-	{
-		id: "nemotron-3-ultra-free",
-		name: "Nemotron 3 Ultra Free",
-		reasoning: true,
-		contextWindow: 1_000_000,
-		maxTokens: 128_000,
 	},
 	{
 		id: "nemotron-3.5-lightning-free",
@@ -930,19 +1009,19 @@ const KNOWN_MODELS: ModelDef[] = [
 		maxTokens: 32_000,
 	},
 	{
-		id: "longcat-2.5-preview-free",
-		name: "LongCat 2.5 Preview",
-		reasoning: true,
-		contextWindow: 1_000_000,
-		maxTokens: 131_072,
-	},
-	{
 		id: "deepseek-v4.1-flash-free",
 		name: "DeepSeek V4.1 Flash Free",
 		reasoning: true,
-		contextWindow: 200_000,
-		maxTokens: 32_000,
+		contextWindow: 320_000,
+		maxTokens: 64_000,
 		input: ["text", "image"],
+	},
+	{
+		id: "flint-40b-free",
+		name: "Flint 40B Free",
+		reasoning: true,
+		contextWindow: 200_000,
+		maxTokens: 32_768,
 	},
 	{
 		id: "glm-5.3-flash-free",
@@ -951,13 +1030,6 @@ const KNOWN_MODELS: ModelDef[] = [
 		contextWindow: 200_000,
 		maxTokens: 32_000,
 		input: ["text", "image"],
-	},
-	{
-		id: "cat-jam-free",
-		name: "Cat Jam Free",
-		reasoning: true,
-		contextWindow: 1_048_576,
-		maxTokens: 131_072,
 	},
 	{
 		id: "nemotron-3.5-super-vl-free",
@@ -970,14 +1042,12 @@ const KNOWN_MODELS: ModelDef[] = [
 ];
 
 // KiloCode gateway free models (keyless — https://kilo.ai/docs/gateway).
-// Sweep 2026-10-20: stealth/cat-jam and stealth/glyph-cluster now answer 401
-// PAID_MODEL_AUTH_REQUIRED (stealth lane went sign-in). poolside/laguna-xs
-// 429s consistently (shared pool) and liquid/lfm-2.5 504s consistently —
-// dropped. Added minimax/minimax-m3.1-flash:free (chat 200, image+video in)
-// and xingchen-agi/xing4.0-29b-a4b:free (chat 200 on retry — shared-pool
-// 429s under load, treat flaky). inkling-small kept: healthy except its own
-// provider-side rpd cap. thinkingmachines/inkling-*-large variants are
-// catalog-listed but per-day capped and slow — not registered.
+// Sweep 2026-10-26: minimax/minimax-m3.1-flash:free (404 model gone) and
+// thinkingmachines/inkling-small:free (404 unavailable) dropped; added
+// recursive/flint-v1.0:free (chat 200, ctx 262144 text-only from catalog).
+// liquid/lfm-2.5-2.6b:free and poolside/laguna-xs-2.1:free are back in the
+// catalog but still answer 429 on probe — stay dropped. openrouter/free is
+// catalog-listed again (it had been pinned through absence).
 const KILO_MODELS: ModelDef[] = [
 	{
 		id: "kilo-auto/free",
@@ -987,21 +1057,11 @@ const KILO_MODELS: ModelDef[] = [
 		maxTokens: 10_000,
 	},
 	{
-		id: "minimax/minimax-m3.1-flash:free",
-		name: "MiniMax M3.1 Flash Free",
+		id: "recursive/flint-v1.0:free",
+		name: "Recursive Flint v1.0 Free",
 		reasoning: true,
-		contextWindow: 1_000_000,
-		maxTokens: 524_288,
-		input: ["text", "image"],
-		thinkingLevelMap: {
-			off: null,
-			minimal: "low",
-			low: "low",
-			medium: "medium",
-			high: "high",
-			xhigh: "xhigh",
-			max: "max",
-		},
+		contextWindow: 262_144,
+		maxTokens: 32_768,
 	},
 	{
 		id: "xingchen-agi/xing4.0-29b-a4b:free",
@@ -1084,15 +1144,6 @@ const KILO_MODELS: ModelDef[] = [
 		reasoning: true,
 		contextWindow: 262_144,
 		maxTokens: 32_768,
-		thinkingFormat: "openrouter",
-	},
-	{
-		id: "thinkingmachines/inkling-small:free",
-		name: "Inkling Small Free",
-		reasoning: true,
-		contextWindow: 1_048_576,
-		maxTokens: 262_144,
-		input: ["text", "image"],
 		thinkingFormat: "openrouter",
 	},
 	{

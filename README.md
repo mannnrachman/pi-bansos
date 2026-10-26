@@ -22,7 +22,7 @@ Free model provider for **[pi](https://pi.dev)** ([browse packages](https://pi.d
 ## Features
 
 - **Zero cost** — all models free, no API key needed for supported upstreams
-- **25 models from 2 sources** — 11 OpenCode Zen + 14 KiloCode gateway
+- **21 models from 2 sources** — 8 OpenCode Zen + 13 KiloCode gateway
 - **Instant startup** — the model catalog is cached locally and registered without waiting on upstream; it refreshes in the background
 - **Auto health-check** — only catalog-listed models registered; dead ones skipped silently
 - **Local-only proxy** — binds to `127.0.0.1`, nothing exposed externally; one proxy per loaded extension, shared by every session that uses it (including OMP's in-process subagents)
@@ -33,37 +33,34 @@ Free model provider for **[pi](https://pi.dev)** ([browse packages](https://pi.d
 
 ## Models
 
-**25 curated total: 11 OpenCode + 14 KiloCode.** All models are free. The provider is one `bansos` entry, but model names show their upstream: **OpenCode** or **KiloCode**. The startup check only verifies catalog membership; upstream access can still change between startup and a request.
+**21 curated total: 8 OpenCode + 13 KiloCode.** All models are free. The provider is one `bansos` entry, but model names show their upstream: **OpenCode** or **KiloCode**. The startup check only verifies catalog membership; upstream access can still change between startup and a request.
 
-### OpenCode Zen (11 models)
+### OpenCode Zen (8 models)
 
 | Model ID                      | Name                        | Vision | API  | Context     | Max Output  | Reasoning |
 | ----------------------------- | --------------------------- | ------ | ---- | ----------- | ----------- | --------- |
 | `beam-free`                   | Beam Free                   | ❌     | chat | 262K tokens | 65K tokens  | ✅        |
-| `minimax-m3.1-flash-free`     | MiniMax M3.1 Flash Free     | ✅     | chat | 1M tokens   | 524K tokens | ✅        |
 | `mimo-v2.6-flash-free`        | MiMo V2.6 Flash Free        | ✅     | chat | 200K tokens | 32K tokens  | ✅        |
-| `nemotron-3-ultra-free`       | Nemotron 3 Ultra Free       | ❌     | chat | 1M tokens   | 128K tokens | ✅        |
 | `nemotron-3.5-lightning-free` | Nemotron 3.5 Lightning Free | ❌     | chat | 262K tokens | 262K tokens | ✅        |
 | `big-pickle`                  | Big Pickle                  | ❌     | chat | 200K tokens | 32K tokens  | ✅        |
-| `longcat-2.5-preview-free`    | LongCat 2.5 Preview         | ❌     | chat | 1M tokens   | 131K tokens | ✅        |
-| `deepseek-v4.1-flash-free`    | DeepSeek V4.1 Flash Free    | ✅     | chat | 200K tokens | 32K tokens  | ✅        |
+| `deepseek-v4.1-flash-free`    | DeepSeek V4.1 Flash Free    | ✅     | chat | 320K tokens | 64K tokens  | ✅        |
+| `flint-40b-free`              | Flint 40B Free              | ❌     | chat | 200K tokens | 32K tokens  | ✅        |
 | `glm-5.3-flash-free`          | GLM 5.3 Flash Free          | ✅     | chat | 200K tokens | 32K tokens  | ✅        |
-| `cat-jam-free`                | Cat Jam Free                | ❌     | chat | 1M tokens   | 131K tokens | ✅        |
 | `nemotron-3.5-super-vl-free`  | Nemotron 3.5 Super VL Free  | ✅     | chat | 1M tokens   | 131K tokens | ✅        |
 
 
-**Sweep 2026-10-20** (live probe, full fingerprint, of every registered id): upstream **deprecated** muse-spark-1.3/1.2, space-bunny and ll-alpha (`410` — space-bunny's deprecation notice itself names `minimax-m3.1-flash-free` as the replacement, registered here), and **removed** step-5-preview + ling-3.0/3.1 (`400` upstream-unavailable). `beam-free` and `minimax-m3.1-flash-free` are catalog-listed but **not yet chat-verified**: our probe IP currently hits OpenCode's new IP-level block (403 *"we've detected abusive traffic from this IP address"* — a different gate from `FreeTierError`), so their first verified chat needs a relay egress ([`/bansos deploy`](#bansos-deploy--one-command-relay)). The fingerprint itself passes the gate — the `410`/`400` verdicts above prove the requests reached the model layer.
+**Sweep 2026-10-26**: the upstream catalog dropped `minimax-m3.1-flash-free`, `nemotron-3-ultra-free`, `longcat-2.5-preview-free` and `cat-jam-free`; added `flint-40b-free` — catalog-listed but **not yet chat-verified** (the probe IP is quota-held, upstream `Retry-After` ≈ 12.7 h). `deepseek-v4.1-flash-free` context raised to 320K (measured ~330k reject ceiling). `muse-spark-1.2/1.3` and `muse-wonder-1.0` are back in the catalog but stay unregistered; the muse `/v1/responses` routing remains in place for a future return.
 
 **Muse note:** the muse-class models are 410-deprecated for now, but their Responses-API routing (`/v1/responses`) stays in place — if a muse-class id returns to the catalog it re-routes automatically, no code change needed.
 
-### KiloCode Gateway (14 models)
+### KiloCode Gateway (13 models)
 
 Keyless — 200 requests/hour per IP. No `Authorization` header is sent; the free gateway rejects placeholder tokens.
 
 | Model ID                                             | Name                             | Vision | Context     | Max Output  | Reasoning |
 | ---------------------------------------------------- | -------------------------------- | ------ | ----------- | ----------- | --------- |
 | `kilo-auto/free`                                     | Kilo Auto Free                   | ❌      | 256K tokens | 10K tokens  | ❌         |
-| `minimax/minimax-m3.1-flash:free`                    | MiniMax M3.1 Flash Free          | ✅      | 1M tokens   | 524K tokens | ✅         |
+| `recursive/flint-v1.0:free`                          | Recursive Flint v1.0 Free        | ❌      | 256K tokens | 32K tokens  | ✅         |
 | `xingchen-agi/xing4.0-29b-a4b:free`                  | Xing 4.0 29B A4B Free            | ❌      | 262K tokens | 236K tokens | ✅         |
 | `nvidia/nemotron-3-ultra-550b-a55b:free`             | Nemotron 3 Ultra Free            | ❌      | 1M tokens   | 65K tokens  | ✅         |
 | `nvidia/nemotron-3-super-120b-a12b:free`             | Nemotron 3 Super Free            | ❌      | 262K tokens | 236K tokens | ✅         |
@@ -74,13 +71,12 @@ Keyless — 200 requests/hour per IP. No `Authorization` header is sent; the fre
 | `nvidia/nemotron-3.5-lightning:free`                 | Nemotron 3.5 Lightning Free      | ❌      | 1M tokens   | 65K tokens  | ✅         |
 | `nvidia/nemotron-3.5-content-safety:free`            | Nemotron 3.5 Content Safety Free | ✅      | 128K tokens | 8K tokens   | ✅         |
 | `poolside/laguna-s-2.1:free`                         | Laguna S 2.1 Free                | ❌      | 262K tokens | 32K tokens  | ✅         |
-| `thinkingmachines/inkling-small:free`                | Inkling Small Free               | ✅      | 1M tokens   | 262K tokens | ✅         |
 | `nvidia/nemotron-3.5-super-vl:free`                  | Nemotron 3.5 Super VL Free       | ✅      | 1M tokens   | 131K tokens | ✅         |
 
-**Sweep 2026-10-20**: added `minimax/minimax-m3.1-flash:free` (chat 200) and `xingchen-agi/xing4.0-29b-a4b:free` (chat 200 — its Phala shared pool occasionally 429s under load; retry). Removed `stealth/glyph-cluster` and `stealth/cat-jam` (the stealth lane now answers `401 You need to sign in to use this model`), `poolside/laguna-xs-2.1:free` (consistent 429 shared-pool) and `liquid/lfm-2.5-2.6b:free` (consistent upstream 504). `thinkingmachines/inkling-small:free` stays: healthy apart from its own provider-side daily cap. Kilo's NVIDIA free endpoints may retain prompts or use them for training; do not send confidential data.
+**Sweep 2026-10-26**: added `recursive/flint-v1.0:free` (chat 200, 262K text-only). Dropped `minimax/minimax-m3.1-flash:free` (404 model gone) and `thinkingmachines/inkling-small:free` (404 unavailable). `liquid/lfm-2.5-2.6b:free` and `poolside/laguna-xs-2.1:free` are back in the catalog but still 429 on probe — stay out. Kilo's NVIDIA free endpoints may retain prompts or use them for training; do not send confidential data.
 
 
-`openrouter/free` is **pinned**: it no longer appears in the `/models` catalog, but chat completions still serve it — so it stays registered.
+`openrouter/free` is catalog-listed again (it had been pinned through an absence spell); it stays registered either way.
 
 Rate limiting is separated internally by upstream: OpenCode uses its UTC-day local guard and its own upstream free quota; Kilo uses a rolling-hour local guard matching its documented 200/hour/IP limit.
 
