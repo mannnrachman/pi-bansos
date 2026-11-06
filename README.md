@@ -28,18 +28,20 @@ Free model provider for **[pi](https://pi.dev)** ([browse packages](https://pi.d
 - **Local-only proxy** — binds to `127.0.0.1`, nothing exposed externally; one proxy per loaded extension, shared by every session that uses it (including OMP's in-process subagents)
 - **Optional relay egress with automatic failover** — route through a **Cloudflare Workers** (one command, free, no card) or Vercel relay to dodge per-IP rate limits; a 429/403/unreachable relay cools down (escalating backoff) and the request rolls to the next healthy relay or goes direct — toggled live via `/bansos`
 - **OpenCode free-tier fingerprint kept current** — auto-tracks the live `opencode-ai` UA version, generates spec-correct session/request IDs (verified against opencode's own `Identifier`), and ships the tool-pair payload the 1.19.0 gate expects
-- **Upstream 429/403 triage with reactive cooldowns** — free-tier refusals are classified live: a quota `429 FreeUsageLimitError` cools just that model (90 s base, escalating, upstream `Retry-After` honored), an IP-flag `403 "abusive traffic"` fails fast with a switch-egress hint instead of hammering a network no backoff can fix, and a fingerprint-gate `403` is surfaced as-is. The session gets a precise reason + `Retry-After` instead of a raw refusal replay.
+- **Upstream 429/403 triage with reactive cooldowns** — free-tier refusals are classified live: a quota `429 FreeUsageLimitError` cools just that model (90 s base, escalating, upstream `Retry-After` honored up to one full quota day), an IP-flag `403 "abusive traffic"` fails fast with a switch-egress hint instead of hammering a network no backoff can fix, and a fingerprint-gate `403` is surfaced as-is. The session gets a precise reason + `Retry-After` instead of a raw refusal replay.
 - **Auto port bump** — if port 18080 is taken, automatically tries the next one (up to 18100)
 
 ## Models
 
 **21 curated total: 8 OpenCode + 13 KiloCode.** All models are free. The provider is one `bansos` entry, but model names show their upstream: **OpenCode** or **KiloCode**. The startup check only verifies catalog membership; upstream access can still change between startup and a request.
 
-### OpenCode Zen (8 models)
+### OpenCode Zen (10 models)
 
 | Model ID                      | Name                        | Vision | API  | Context     | Max Output  | Reasoning |
 | ----------------------------- | --------------------------- | ------ | ---- | ----------- | ----------- | --------- |
 | `beam-free`                   | Beam Free                   | ❌     | chat | 262K tokens | 65K tokens  | ✅        |
+| `crouton-alpha-free`          | Crouton Alpha Free          | ❌     | chat | 262K tokens | 65K tokens  | ✅        |
+| `pulse-alpha-free`            | Pulse Alpha Free            | ❌     | chat | 262K tokens | 65K tokens  | ✅        |
 | `mimo-v2.6-flash-free`        | MiMo V2.6 Flash Free        | ✅     | chat | 200K tokens | 32K tokens  | ✅        |
 | `nemotron-3.5-lightning-free` | Nemotron 3.5 Lightning Free | ❌     | chat | 262K tokens | 262K tokens | ✅        |
 | `big-pickle`                  | Big Pickle                  | ❌     | chat | 200K tokens | 32K tokens  | ✅        |
@@ -49,34 +51,28 @@ Free model provider for **[pi](https://pi.dev)** ([browse packages](https://pi.d
 | `nemotron-3.5-super-vl-free`  | Nemotron 3.5 Super VL Free  | ✅     | chat | 1M tokens   | 131K tokens | ✅        |
 
 
-**Sweep 2026-10-26**: the upstream catalog dropped `minimax-m3.1-flash-free`, `nemotron-3-ultra-free`, `longcat-2.5-preview-free` and `cat-jam-free`; added `flint-40b-free` — catalog-listed but **not yet chat-verified** (the probe IP is quota-held, upstream `Retry-After` ≈ 12.7 h). `deepseek-v4.1-flash-free` context raised to 320K (measured ~330k reject ceiling). `muse-spark-1.2/1.3` and `muse-wonder-1.0` are back in the catalog but stay unregistered; the muse `/v1/responses` routing remains in place for a future return.
+**Sweep 2026-11-06**: added `crouton-alpha-free` and `pulse-alpha-free` (catalog-listed; chat-verify pending — the probe egress is quota-held to UTC midnight). Core models (big-pickle, beam, mimo, deepseek, glm, lightning, super-vl) confirmed alive through a community gateway reading the same upstream, and independently by 9router PR #5381 on the new v3 wire. **The 2026-11 gate turn**: free-tier requests must now carry the v2 CLI dev wire — UA `opencode/dev/<build>/opencode`, `x-opencode-client: opencode`, per-request `x-opencode-request`, all four session headers, `prompt_cache_key` bound to the session — and no tool declaration may contain the substring `terminal` (textual gate; such tools are aliased to `run_command` on the wire automatically). Direct OpenCode requests now use a fresh TLS connection each time: keep-alive socket reuse was letting one flagged (ip, session) pair poison every request riding that connection into a 429 cascade.
 
 **Muse note:** the muse-class models are 410-deprecated for now, but their Responses-API routing (`/v1/responses`) stays in place — if a muse-class id returns to the catalog it re-routes automatically, no code change needed.
 
-### KiloCode Gateway (13 models)
+### KiloCode Gateway (8 models)
 
 Keyless — 200 requests/hour per IP. No `Authorization` header is sent; the free gateway rejects placeholder tokens.
 
 | Model ID                                             | Name                             | Vision | Context     | Max Output  | Reasoning |
 | ---------------------------------------------------- | -------------------------------- | ------ | ----------- | ----------- | --------- |
 | `kilo-auto/free`                                     | Kilo Auto Free                   | ❌      | 256K tokens | 10K tokens  | ❌         |
-| `recursive/flint-v1.0:free`                          | Recursive Flint v1.0 Free        | ❌      | 256K tokens | 32K tokens  | ✅         |
-| `xingchen-agi/xing4.0-29b-a4b:free`                  | Xing 4.0 29B A4B Free            | ❌      | 262K tokens | 236K tokens | ✅         |
 | `nvidia/nemotron-3-ultra-550b-a55b:free`             | Nemotron 3 Ultra Free            | ❌      | 1M tokens   | 65K tokens  | ✅         |
-| `nvidia/nemotron-3-super-120b-a12b:free`             | Nemotron 3 Super Free            | ❌      | 262K tokens | 236K tokens | ✅         |
 | `dots-studio/dots-3-note-preview:free`               | Dots3-Note Preview Free          | ✅      | 512K tokens | 460K tokens | ✅         |
 | `cohere/north-mini-code:free`                        | North Mini Code Free             | ❌      | 256K tokens | 64K tokens  | ❌         |
 | `nvidia/nemotron-3-nano-omni-30b-a3b-reasoning:free` | Nemotron 3 Nano Omni Free        | ✅      | 256K tokens | 65K tokens  | ✅         |
 | `openrouter/free`                                    | OpenRouter Free (auto)           | ✅      | 200K tokens | 65K tokens  | ❌         |
 | `nvidia/nemotron-3.5-lightning:free`                 | Nemotron 3.5 Lightning Free      | ❌      | 1M tokens   | 65K tokens  | ✅         |
-| `nvidia/nemotron-3.5-content-safety:free`            | Nemotron 3.5 Content Safety Free | ✅      | 128K tokens | 8K tokens   | ✅         |
-| `poolside/laguna-s-2.1:free`                         | Laguna S 2.1 Free                | ❌      | 262K tokens | 32K tokens  | ✅         |
 | `nvidia/nemotron-3.5-super-vl:free`                  | Nemotron 3.5 Super VL Free       | ✅      | 1M tokens   | 131K tokens | ✅         |
 
-**Sweep 2026-10-26**: added `recursive/flint-v1.0:free` (chat 200, 262K text-only). Dropped `minimax/minimax-m3.1-flash:free` (404 model gone) and `thinkingmachines/inkling-small:free` (404 unavailable). `liquid/lfm-2.5-2.6b:free` and `poolside/laguna-xs-2.1:free` are back in the catalog but still 429 on probe — stay out. Kilo's NVIDIA free endpoints may retain prompts or use them for training; do not send confidential data.
+**Sweep 2026-11-06**: the gateway shed most of its free list — dropped `recursive/flint-v1.0:free`, `xingchen-agi/xing4.0-29b-a4b:free`, `nvidia/nemotron-3-super-120b-a12b:free`, `nvidia/nemotron-3.5-content-safety:free` and `poolside/laguna-s-2.1:free` (all gone from the live catalog). All 8 survivors chat-verified 200 today (`nemotron-3-ultra` needed one retry past a transient 503). Kilo's NVIDIA free endpoints may retain prompts or use them for training; do not send confidential data.
 
 
-`openrouter/free` is catalog-listed again (it had been pinned through an absence spell); it stays registered either way.
 
 Rate limiting is separated internally by upstream: OpenCode uses its UTC-day local guard and its own upstream free quota; Kilo uses a rolling-hour local guard matching its documented 200/hour/IP limit.
 
@@ -273,7 +269,7 @@ Both live outside the package directory, so npm updates never wipe them. The hos
 - Free upstream models are best-effort: promos can expire, model IDs can change, and rate limits may apply
 - pi-bansos health-checks against the cached/live catalog at startup so unavailable models are skipped instead of registered
 - KiloCode gateway: 200 req/hr per IP, keyless
-- Upstream refusals are triaged, not replayed: a quota `429 FreeUsageLimitError` cools **just that model** (90 s base, escalating; upstream `Retry-After` honored, capped 1 h), an IP-flag `403 "abusive traffic from this IP address"` fails fast with a switch-egress hint (`/bansos deploy`) while no relay is active, and a fingerprint-gate `403 FreeTierError` is surfaced as-is. Any 2xx clears the cooldowns
+- Upstream refusals are triaged, not replayed: a quota `429 FreeUsageLimitError` cools **just that model** (90 s base, escalating; upstream `Retry-After` honored, capped at one UTC quota day), an IP-flag `403 "abusive traffic from this IP address"` fails fast with a switch-egress hint (`/bansos deploy`) while no relay is active, and a fingerprint-gate `403 FreeTierError` is surfaced as-is. Any 2xx clears the cooldowns
 - OpenCode's free limits are dynamic and metered per account/workspace/network — a shared or CGNAT IP can be flagged because of *other* users, so a 429 with zero personal usage is usually the network bucket, not the model
 - Catalog specs (context, max output, modalities) come from the curated model lists in the extension; the cache only stores which IDs are alive
 

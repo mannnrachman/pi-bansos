@@ -47,8 +47,9 @@ export function classifyUpstreamError(
 
 /**
  * Parse a `Retry-After` header (delay-seconds or HTTP-date form).
- * Returns null when absent/unparseable. Values are clamped to [0, 3600]s so
- * a hostile/garbage header cannot wedge a model for hours.
+ * Returns null when absent/unparseable. Values are clamped to [0, 86400]s
+ * (one UTC quota day — OpenCode's real hints run ~22h) so a hostile header
+ * cannot wedge a model for longer than the quota itself lasts.
  */
 export function retryAfterSeconds(
 	value: string | null | undefined,
@@ -58,10 +59,10 @@ export function retryAfterSeconds(
 	const trimmed = value.trim();
 	if (trimmed === "") return null;
 	const n = Number(trimmed);
-	if (Number.isFinite(n) && n >= 0) return Math.min(Math.floor(n), 3600);
+	if (Number.isFinite(n) && n >= 0) return Math.min(Math.floor(n), 86_400);
 	const date = Date.parse(trimmed);
 	if (!Number.isNaN(date)) {
-		return Math.min(Math.max(0, Math.ceil((date - now) / 1000)), 3600);
+		return Math.min(Math.max(0, Math.ceil((date - now) / 1000)), 86_400);
 	}
 	return null;
 }
@@ -72,8 +73,14 @@ const QUOTA_BASE_MS = 90_000;
 const QUOTA_CAP_MS = 15 * 60_000;
 const EGRESS_BASE_MS = 5 * 60_000;
 const EGRESS_CAP_MS = 30 * 60_000;
-/** Ceiling for a server-provided Retry-After (keeps long hints sane). */
-const SERVER_HINT_CAP_MS = 60 * 60_000;
+/**
+ * Ceiling for a server-provided Retry-After. OpenCode's free-tier 429s now
+ * carry Retry-After counting down to UTC midnight (~22h observed, 9router
+ * #5297/#5368), and honoring the real value beats hammering a spent bucket;
+ * the cap only guards against a hostile/garbage header wedging a model
+ * permanently (24h = one full quota day, the longest sane hint).
+ */
+const SERVER_HINT_CAP_MS = 24 * 60 * 60_000;
 
 export type Cooldown = {
 	kind: "quota" | "ip-flagged";

@@ -1,5 +1,17 @@
 # Changelog
 
+## [0.8.0] - 2026-11-06
+
+### Added
+- **v3 wire fingerprint** (9router [#5381](https://github.com/decolua/9router/pull/5381), live-verified 200): the ~Nov 1 gate turn rejects the old client shape with `429 FreeUsageLimitError`. Free-tier requests must now carry the v2 CLI dev wire: UA `opencode/dev/0.0.0-dev-202610272228/opencode` (auto-tracked from npm releases, env override unchanged), `x-opencode-client: opencode` (was `desktop`), a per-request `x-opencode-request: msg_<id>` (required again after the v2 gate rejected it), all four session headers (`x-opencode-session`, `x-opencode-session-id`, `x-session-affinity`, `X-Session-Id`), and `prompt_cache_key` bound to the session.
+- **`terminal` tool-name gate** (9router [#5328](https://github.com/decolua/9router/pull/5328)): upstream textually scans `tools[]` and 429s any declared tool name containing the substring `terminal` (case-insensitive). Both the chat and responses lanes now alias such declarations to `run_command`/`run_command_2`/… on the wire (existing collision aliases keep `*_pi`), with responses mapped back on the reply path as before.
+- **Fresh TLS connection per direct OpenCode request**: keep-alive socket reuse (undici pool) let one flagged `(ip, session)` pair poison every request riding that connection into a 429 cascade. Direct OpenCode calls now opt out of the connection pool via a dedicated undici `Agent` (new runtime dependency); relay lanes are untouched.
+
+### Changed
+- **`Retry-After` cap raised to one UTC quota day (24 h)**: OpenCode's daily 429s now carry real ~22 h countdowns to UTC midnight (9router [#5297](https://github.com/decolua/9router/pull/5297)/[#5368](https://github.com/decolua/9router/pull/5368)); the old 1 h cap made the client hammer a spent bucket for the rest of the day.
+- **Model sweep 2026-11-06** (live catalogs + probes): OpenCode added `crouton-alpha-free` and `pulse-alpha-free` (catalog-listed; chat-verify pending — probe egress quota-held to UTC midnight; core models confirmed alive via a community gateway reading the same upstream, independently by 9router PR #5381). KiloCode shed most of its free list — dropped `recursive/flint-v1.0:free`, `xingchen-agi/xing4.0-29b-a4b:free`, `nvidia/nemotron-3-super-120b-a12b:free`, `nvidia/nemotron-3.5-content-safety:free` and `poolside/laguna-s-2.1:free`; all 8 survivors chat-verified 200. Catalog: 21 → 18 (10 OpenCode + 8 KiloCode).
+- Tests: new `tests/opencode-wire.test.ts` covers the v3 headers (UA dev-wire shape + env override, four session headers, per-request id minting, cache-key binding, project-id shape) and the `terminal` aliasing on both lanes; catalog suite asserts the 2026-11-06 lists; cooldown suite asserts the 24 h hint cap. Suite: 25/25.
+
 ## [0.7.2] - 2026-10-26
 
 ### Added

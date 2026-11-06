@@ -41,7 +41,10 @@ test("parses Retry-After in seconds and HTTP-date form, clamped", () => {
 	assert.equal(retryAfterSeconds("garbage"), null);
 	assert.equal(retryAfterSeconds("0"), 0);
 	assert.equal(retryAfterSeconds("120"), 120);
-	assert.equal(retryAfterSeconds("99999"), 3600);
+	// Cap is one UTC quota day (OpenCode's real hints run ~22h, 9router #5368).
+	assert.equal(retryAfterSeconds("99999"), 86_400);
+	// A real OpenCode daily hint (76,735 s ≈ 21.3 h) passes through intact.
+	assert.equal(retryAfterSeconds("76735"), 76_735);
 	const now = Date.parse("2026-10-23T12:00:00Z");
 	assert.equal(retryAfterSeconds("120", now), 120);
 	// 90 s in the future → 90; already past → 0.
@@ -75,9 +78,10 @@ test("quota cooldown escalates and honors a longer server Retry-After", () => {
 	const t0 = 1_000_000;
 	assert.equal(h.recordQuotaFailure("opencode", "m", null, t0), 90_000);
 	assert.equal(h.recordQuotaFailure("opencode", "m", null, t0), 180_000);
-	// Server hint (300 s) outranks the 90 s base but is capped at 1 h.
+	// Server hint (300 s) outranks the 90 s base; a full-day hint (~22 h)
+	// passes through uncapped (cap = 24 h).
 	assert.equal(h.recordQuotaFailure("opencode", "m2", 300, t0), 300_000);
-	assert.equal(h.recordQuotaFailure("opencode", "m3", 7200, t0), 3_600_000);
+	assert.equal(h.recordQuotaFailure("opencode", "m3", 7200, t0), 7_200_000);
 	// A short hint never shortens the escalated floor.
 	assert.equal(h.recordQuotaFailure("opencode", "m", 5, t0), 360_000);
 });

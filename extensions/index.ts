@@ -12,6 +12,9 @@ import path from "node:path";
 import { Readable } from "node:stream";
 import { StringDecoder } from "node:string_decoder";
 import { fileURLToPath } from "node:url";
+// Node ships undici internally; the import keeps the fresh-connection
+// dispatcher self-contained without a dependency entry.
+import { Agent } from "undici";
 import {
 	classifyUpstreamError,
 	retryAfterSeconds,
@@ -34,13 +37,15 @@ const BANSOS_DEBUG = process.env.BANSOS_DEBUG === "1";
 const HOST = "127.0.0.1";
 const API = "https://opencode.ai/zen/v1"; // models catalog only — chat moved to /inference/v1
 
-// OpenCode Zen free-tier client fingerprint (verified live 2026-09-18).
-// Missing any one → 403 FreeTierError.
-// UA version tracks the live opencode-ai npm release:
-// env override > live version > disk cache > pinned fallback. The gate has
-// rejected stale UA versions before; auto-refresh keeps us off that cliff.
-const OPENCODE_UA_FALLBACK = "1.18.31";
-const OPENCODE_UA_VERSION_RE = /^\d+\.\d+\.\d+$/;
+// OpenCode Zen free-tier client fingerprint.
+// v3 wire (2026-11-06, 9router PR #5381 — live-verified 200): the gate now
+// requires parity with the v2 CLI dev wire: UA `opencode/dev/<build>/opencode`,
+// x-opencode-client: "opencode", per-request x-opencode-request, all FOUR
+// session headers, prompt_cache_key bound to the session, per-boot 40-hex
+// project id. Legacy v1 shapes answer 429 FreeUsageLimitError since ~Nov 1.
+// UA build tracks the dev wire stamp; env override wins as always.
+const OPENCODE_UA_FALLBACK = "opencode/dev/0.0.0-dev-202610272228/opencode";
+const OPENCODE_UA_VERSION_RE = /^opencode\/(?:dev\/)?[\w.-]+\/opencode$/;
 const OPENCODE_USER_AGENT_ENV = "BANSOS_OPENCODE_UA";
 const BASE62 =
 	"0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz";
@@ -172,14 +177,17 @@ function currentOpenCodeSession(): string {
 }
 
 // Live UA resolution — offline-safe, never throws, never blocks.
-// Precedence: env override > in-process live version > disk cache > pinned.
-let liveOpenCodeVersion: string | null = null;
+// v3 wire: the UA is a full dev-wire stamp (not a bare semver), so the
+// auto-tracker now stores the whole string. Precedence unchanged:
+// env override > in-process live value > disk cache > pinned.
+let liveOpenCodeUA: string | null = null;
 function getOpenCodeUA(): string {
 	const override = process.env[OPENCODE_USER_AGENT_ENV]?.trim();
-	if (override) return override.startsWith("opencode/") ? override : `opencode/${override}`;
-	if (liveOpenCodeVersion && OPENCODE_UA_VERSION_RE.test(liveOpenCodeVersion))
-		return `opencode/${liveOpenCodeVersion}`;
-	return `opencode/${OPENCODE_UA_FALLBACK}`;
+	if (override)
+		return override.startsWith("opencode/") ? override : `opencode/${override}`;
+	if (liveOpenCodeUA && OPENCODE_UA_VERSION_RE.test(liveOpenCodeUA))
+		return liveOpenCodeUA;
+	return OPENCODE_UA_FALLBACK;
 }
 function uaVersionCacheFile(): string | null {
 	try {
@@ -188,8 +196,10 @@ function uaVersionCacheFile(): string | null {
 		return null;
 	}
 }
-/** Fire-and-forget: track the live opencode-ai npm version so the gate never
- *  sees a stale UA. Failure keeps the pinned fallback. */
+/** Fire-and-forget: read the opencode-ai package "opencode" bin metadata so
+ *  the gate never sees a stale dev-wire stamp. The npm dist does not publish
+ *  the dev stamp directly; we synthesize `opencode/dev/<version>/opencode`
+ *  from the released version. Failure keeps the pinned fallback. */
 async function refreshOpenCodeUA(): Promise<void> {
 	if (process.env[OPENCODE_USER_AGENT_ENV]?.trim()) return;
 	try {
@@ -198,45 +208,50 @@ async function refreshOpenCodeUA(): Promise<void> {
 		});
 		if (!r.ok) return;
 		const version = ((await r.json()) as { version?: unknown })?.version;
-		if (typeof version !== "string" || !OPENCODE_UA_VERSION_RE.test(version)) return;
-		if (version === liveOpenCodeVersion) return;
-		liveOpenCodeVersion = version;
+		if (typeof version !== "string") return;
+		const ua = `opencode/dev/${version}/opencode`;
+		if (!OPENCODE_UA_VERSION_RE.test(ua) || ua === liveOpenCodeUA) return;
+		liveOpenCodeUA = ua;
 		const file = uaVersionCacheFile();
 		if (file) {
 			try {
 				fs.mkdirSync(path.dirname(file), { recursive: true });
-				fs.writeFileSync(file, JSON.stringify({ version, checkedAt: Date.now() }), {
+				fs.writeFileSync(file, JSON.stringify({ ua, checkedAt: Date.now() }), {
 					mode: 0o600,
 				});
 			} catch {}
 		}
-		log("info", "opencode UA version refreshed", { version });
+		log("info", "opencode UA refreshed", { ua });
 	} catch {
 		// offline / npm unreachable — pinned fallback keeps working
 	}
 }
 
-function opencodeHeaders(withRequestHeader = false): Record<string, string> {
+function opencodeHeaders(): Record<string, string> {
 	const traceId = randomBytes(16).toString("hex");
 	const spanId = randomBytes(8).toString("hex");
+	const session = currentOpenCodeSession();
 	const headers: Record<string, string> = {
 		"User-Agent": getOpenCodeUA(),
 		Authorization: "Bearer public",
-		"x-opencode-client": "desktop",
+		// v3 wire (9router #5381): client id is "opencode", not "desktop".
+		"x-opencode-client": "opencode",
 		"x-opencode-project": OPENCODE_PROJECT_ID,
-		"x-opencode-session": currentOpenCodeSession(),
+		"x-opencode-session": session,
 		// v2 gate (2026-10-14): BOTH session headers must be present and equal.
-		"x-opencode-session-id": currentOpenCodeSession(),
-		"x-session-affinity": currentOpenCodeSession(),
+		"x-opencode-session-id": session,
+		"x-session-affinity": session,
+		// v3 wire: all four session headers, incl. the capitalized variant.
+		"X-Session-Id": session,
+		// v3 wire: per-request id is REQUIRED again (v2 had rejected it).
+		"x-opencode-request": generateRequestId(),
+		// v3 wire: cache key bound to the session (valid upstream cache routing).
+		prompt_cache_key: session,
 		// Distributed-tracing headers real opencode clients emit.
 		b3: `${traceId}-${spanId}-1-${spanId}`,
 		traceparent: `00-${traceId}-${spanId}-01`,
 		Accept: "text/event-stream",
 	};
-	// v2 gate REJECTS any x-opencode-request value — only sent when a caller
-	// explicitly opts in (currently nothing does; kept for catalog calls that
-	// still hit the v1 surface).
-	if (withRequestHeader) headers["x-opencode-request"] = generateRequestId();
 	return headers;
 }
 
@@ -260,13 +275,23 @@ function ensureChatFingerprintTools(body: Record<string, unknown>): void {
 	if (!Array.isArray(body.tools)) body.tools = [];
 	// 1) Alias caller tools whose names collide with real opencode tools —
 	// the v2 gate 403s a payload carrying e.g. `bash` next to the exact pair.
+	// v3 (2026-11, 9router #5328): the gate ALSO 429s any declared tool name
+	// containing the substring "terminal" (case-insensitive, textual check on
+	// the declaration alone) — those get the same alias treatment.
 	// `*_pi` on the wire; model replies referencing `bash_pi` are mapped back
 	// in the response path (stripResponseAliases).
 	const wireToCaller = new Map<string, string>();
+	let aliasCounter = 0;
 	body.tools = (body.tools as unknown[]).map((tool) => {
 		const name = toolNameOf(tool);
-		if (!name || !OPENCODE_TOOL_NAMES.has(name.toLowerCase())) return tool;
-		const alias = `${name}_pi`;
+		if (!name) return tool;
+		const lower = name.toLowerCase();
+		const gated =
+			OPENCODE_TOOL_NAMES.has(lower) || lower.includes("terminal");
+		if (!gated) return tool;
+		const alias = OPENCODE_TOOL_NAMES.has(lower)
+			? `${name}_pi`
+			: `run_command${aliasCounter++ ? `_${aliasCounter}` : ""}`;
 		wireToCaller.set(alias, name);
 		if (tool && typeof tool === "object" && !Array.isArray(tool)) {
 			const t = tool as Record<string, unknown>;
@@ -291,9 +316,32 @@ function ensureChatFingerprintTools(body: Record<string, unknown>): void {
 }
 
 function ensureResponsesFingerprintTools(body: Record<string, unknown>): void {
+	// Same "terminal" textual gate applies on the responses surface — alias
+	// those (and colliding names) exactly like the chat path.
+	const wireToCaller = new Map<string, string>();
+	let aliasCounter = 0;
+	if (Array.isArray(body.tools)) {
+		body.tools = (body.tools as unknown[]).map((tool) => {
+			const name = toolNameOf(tool);
+			if (!name) return tool;
+			const lower = name.toLowerCase();
+			if (!OPENCODE_TOOL_NAMES.has(lower) && !lower.includes("terminal"))
+				return tool;
+			const alias = OPENCODE_TOOL_NAMES.has(lower)
+				? `${name}_pi`
+				: `run_command${aliasCounter++ ? `_${aliasCounter}` : ""}`;
+			wireToCaller.set(alias, name);
+			if (tool && typeof tool === "object" && !Array.isArray(tool)) {
+				const t = tool as Record<string, unknown>;
+				if (typeof t.name === "string") t.name = alias;
+			}
+			return tool;
+		});
+	}
+	if (wireToCaller.size)
+		body.__bansosToolAliases = Object.fromEntries(wireToCaller);
 	const present = new Set<string>();
-	if (!Array.isArray(body.tools)) body.tools = [];
-	for (const tool of body.tools as unknown[]) {
+	for (const tool of (body.tools ?? []) as unknown[]) {
 		const name = toolNameOf(tool);
 		if (name) present.add(name);
 	}
@@ -609,13 +657,31 @@ let aliveCatalog: RegisteredModel[] = [];
 // A 403 through a relay is attributed to the relay (its egress IP may be
 // flagged by OpenCode's IP gate — distinct from a fingerprint FreeTierError,
 // which 403s identically on every egress); it cools down and rolls once.
+// v3 wire (9router #5381): OpenCode direct requests use a FRESH TLS
+// connection each time — keep-alive socket reuse lets one flagged
+// (ip, session) poison every request riding that connection (429 cascade).
+const OPENCODE_FRESH_AGENT = new Agent({
+	keepAliveTimeout: 1,
+	keepAliveMaxTimeout: 1,
+	keepAliveTimeoutThreshold: 1,
+});
+function opencodeDirectFetch(url: string, opts: RequestInit): Promise<Response> {
+	return fetch(url, {
+		...opts,
+		// undici dispatcher: opt out of the connection pool (types lag the option)
+		dispatcher: OPENCODE_FRESH_AGENT,
+	} as RequestInit);
+}
 async function relayFetch(
 	url: string,
 	opts: RequestInit = {},
 ): Promise<Response> {
-	if (!relayState.enabled) return fetch(url, opts);
+	const isOpencode = url.startsWith(UPSTREAM_OPENCODE);
+	if (!relayState.enabled)
+		return isOpencode ? opencodeDirectFetch(url, opts) : fetch(url, opts);
 	const candidates = orderedRelayCandidates();
-	if (candidates.length === 0) return fetch(url, opts);
+	if (candidates.length === 0)
+		return isOpencode ? opencodeDirectFetch(url, opts) : fetch(url, opts);
 	const u = new URL(url);
 	let lastError: unknown = null;
 	for (const relay of candidates) {
@@ -655,7 +721,7 @@ async function relayFetch(
 		url,
 		error: String(lastError),
 	});
-	return fetch(url, opts);
+	return isOpencode ? opencodeDirectFetch(url, opts) : fetch(url, opts);
 }
 
 // ── Deploy a fresh Vercel relay ──────────────────────────────────────────────
@@ -968,20 +1034,35 @@ interface ModelDef {
 }
 
 // OpenCode Zen free models verified against the live catalog and inference APIs.
-// Sweep 2026-10-26: the catalog dropped minimax-m3.1-flash-free,
-// nemotron-3-ultra-free, longcat-2.5-preview-free and cat-jam-free (absent
-// from /zen/v1/models). Added flint-40b-free — catalog-listed, NOT yet
-// chat-verified (probe IP is quota-held; upstream Retry-After ~12.7 h).
-// muse-spark-1.2/1.3 and muse-wonder-1.0 are back in the catalog but stay
-// unregistered (muse lane keeps its /responses routing if one returns);
-// jev-1.13-free (protocol unsupported) and `test` stay out too.
-// deepseek-v4.1-flash-free: context 200K → 320K (measured ~330k reject
-// ceiling, 9router #5179). Previously: 2026-10-20 sweep dropped muse-spark,
-// space-bunny, ll-alpha (410), step-5-preview, ling-3.0/3.1 (400).
+// Sweep 2026-11-06 (live /zen/v1/models + community gateway /v1/models): 10
+// free ids. New: crouton-alpha-free, pulse-alpha-free (catalog-listed; chat-
+// verify pending — probe egress quota-locked to UTC midnight, 9router #5368).
+// Alive via community gateway reading the same upstream: big-pickle, beam,
+// mimo, nemotron-3.5-lightning, deepseek, glm, super-vl, flint (9router PR
+// #5381 independently verified big-pickle/mimo/deepseek 200 on the v2 wire).
+// Gone for good: muse-spark-1.2/1.3, space-bunny, ll-alpha (410),
+// minimax-m3.1-flash, nemotron-3-ultra, longcat, cat-jam, step-5,
+// ling-3.0/3.1 (400/absent). muse lane keeps /responses routing if one
+// returns; jev-1.13-free (protocol unsupported) and `test` stay out.
+// deepseek-v4.1-flash-free: ctx 320K (measured ceiling, 9router #5179).
 const KNOWN_MODELS: ModelDef[] = [
 	{
 		id: "beam-free",
 		name: "Beam Free",
+		reasoning: true,
+		contextWindow: 262_144,
+		maxTokens: 65_536,
+	},
+	{
+		id: "crouton-alpha-free",
+		name: "Crouton Alpha Free",
+		reasoning: true,
+		contextWindow: 262_144,
+		maxTokens: 65_536,
+	},
+	{
+		id: "pulse-alpha-free",
+		name: "Pulse Alpha Free",
 		reasoning: true,
 		contextWindow: 262_144,
 		maxTokens: 65_536,
@@ -1042,12 +1123,10 @@ const KNOWN_MODELS: ModelDef[] = [
 ];
 
 // KiloCode gateway free models (keyless — https://kilo.ai/docs/gateway).
-// Sweep 2026-10-26: minimax/minimax-m3.1-flash:free (404 model gone) and
-// thinkingmachines/inkling-small:free (404 unavailable) dropped; added
-// recursive/flint-v1.0:free (chat 200, ctx 262144 text-only from catalog).
-// liquid/lfm-2.5-2.6b:free and poolside/laguna-xs-2.1:free are back in the
-// catalog but still answer 429 on probe — stay dropped. openrouter/free is
-// catalog-listed again (it had been pinned through absence).
+// Sweep 2026-11-06 (live catalog): the gateway shed most of its free list —
+// gone: recursive/flint-v1.0, xingchen-agi/xing4.0, nemotron-3-super,
+// nemotron-3.5-content-safety, poolside/laguna-s. All 8 survivors chat-
+// verified 200 today (nemotron-ultra needed one retry past a transient 503).
 const KILO_MODELS: ModelDef[] = [
 	{
 		id: "kilo-auto/free",
@@ -1057,35 +1136,11 @@ const KILO_MODELS: ModelDef[] = [
 		maxTokens: 10_000,
 	},
 	{
-		id: "recursive/flint-v1.0:free",
-		name: "Recursive Flint v1.0 Free",
-		reasoning: true,
-		contextWindow: 262_144,
-		maxTokens: 32_768,
-	},
-	{
-		id: "xingchen-agi/xing4.0-29b-a4b:free",
-		name: "Xing 4.0 29B A4B Free",
-		reasoning: true,
-		contextWindow: 262_144,
-		maxTokens: 235_929,
-		thinkingFormat: "openrouter",
-	},
-	{
 		id: "nvidia/nemotron-3-ultra-550b-a55b:free",
 		name: "Nemotron 3 Ultra Free",
 		reasoning: true,
 		contextWindow: 1_000_000,
 		maxTokens: 65_536,
-		thinkingFormat: "openrouter",
-	},
-	// ponytail: nemotron-super emits output in `reasoning` field (not `content`) under pi's payload → renders blank in agent use; gateway-direct works. Left registered, known-broken via pi until upstream changes.
-	{
-		id: "nvidia/nemotron-3-super-120b-a12b:free",
-		name: "Nemotron 3 Super Free",
-		reasoning: true,
-		contextWindow: 262_144,
-		maxTokens: 235_929,
 		thinkingFormat: "openrouter",
 	},
 	{
@@ -1127,23 +1182,6 @@ const KILO_MODELS: ModelDef[] = [
 		reasoning: true,
 		contextWindow: 1_000_000,
 		maxTokens: 65_536,
-		thinkingFormat: "openrouter",
-	},
-	{
-		id: "nvidia/nemotron-3.5-content-safety:free",
-		name: "Nemotron 3.5 Content Safety Free",
-		reasoning: true,
-		contextWindow: 128_000,
-		maxTokens: 8_192,
-		input: ["text", "image"],
-		thinkingFormat: "openrouter",
-	},
-	{
-		id: "poolside/laguna-s-2.1:free",
-		name: "Laguna S 2.1 Free",
-		reasoning: true,
-		contextWindow: 262_144,
-		maxTokens: 32_768,
 		thinkingFormat: "openrouter",
 	},
 	{
@@ -1364,9 +1402,9 @@ function catalogIds(data: unknown): Set<string> | null {
 async function opencodeCatalog(): Promise<Set<string> | null> {
 	try {
 		// /zen/v1/models still answers 200 (chat moved to /inference/v1, the
-		// models fetcher did not). Keep the request header on this v1 surface.
+		// models fetcher did not).
 		const r = await fetch(`${API}/models`, {
-			headers: opencodeHeaders(true),
+			headers: opencodeHeaders(),
 			signal: AbortSignal.timeout(10_000),
 		});
 		return r.ok ? catalogIds(await r.json()) : null;
