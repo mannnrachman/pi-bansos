@@ -33,25 +33,26 @@ Free model provider for **[pi](https://pi.dev)** ([browse packages](https://pi.d
 
 ## Models
 
-**21 curated total: 8 OpenCode + 13 KiloCode.** All models are free. The provider is one `bansos` entry, but model names show their upstream: **OpenCode** or **KiloCode**. The startup check only verifies catalog membership; upstream access can still change between startup and a request.
+**19 curated total: 11 OpenCode + 8 KiloCode.** All models are free. The provider is one `bansos` entry, but model names show their upstream: **OpenCode** or **KiloCode**. The startup check only verifies catalog membership; upstream access can still change between startup and a request.
 
-### OpenCode Zen (10 models)
+### OpenCode Zen (11 models)
 
 | Model ID                      | Name                        | Vision | API  | Context     | Max Output  | Reasoning |
 | ----------------------------- | --------------------------- | ------ | ---- | ----------- | ----------- | --------- |
-| `beam-free`                   | Beam Free                   | ❌     | chat | 262K tokens | 65K tokens  | ✅        |
-| `crouton-alpha-free`          | Crouton Alpha Free          | ❌     | chat | 262K tokens | 65K tokens  | ✅        |
-| `pulse-alpha-free`            | Pulse Alpha Free            | ❌     | chat | 262K tokens | 65K tokens  | ✅        |
+| `beam-free`                   | Beam Free                   | ❌     | chat | 1M tokens   | 131K tokens | ✅        |
+| `crouton-alpha-free`          | Crouton Alpha Free          | ✅     | chat | 1M tokens   | 270K tokens | ✅        |
+| `iceman-free`                 | Iceman Free                 | ❌     | chat | 262K tokens | 131K tokens | ✅        |
+| `inkling-2-small-free`        | Inkling 2 Small Free        | ✅     | chat | 1M tokens   | 131K tokens | ✅        |
 | `mimo-v2.6-flash-free`        | MiMo V2.6 Flash Free        | ✅     | chat | 200K tokens | 32K tokens  | ✅        |
 | `nemotron-3.5-lightning-free` | Nemotron 3.5 Lightning Free | ❌     | chat | 262K tokens | 262K tokens | ✅        |
 | `big-pickle`                  | Big Pickle                  | ❌     | chat | 200K tokens | 32K tokens  | ✅        |
 | `deepseek-v4.1-flash-free`    | DeepSeek V4.1 Flash Free    | ✅     | chat | 320K tokens | 64K tokens  | ✅        |
-| `flint-40b-free`              | Flint 40B Free              | ❌     | chat | 200K tokens | 32K tokens  | ✅        |
+| `flint-40b-free`              | Flint 40B Free              | ❌     | chat | 262K tokens | 65K tokens  | ✅        |
 | `glm-5.3-flash-free`          | GLM 5.3 Flash Free          | ✅     | chat | 200K tokens | 32K tokens  | ✅        |
 | `nemotron-3.5-super-vl-free`  | Nemotron 3.5 Super VL Free  | ✅     | chat | 1M tokens   | 131K tokens | ✅        |
 
 
-**Sweep 2026-11-06**: added `crouton-alpha-free` and `pulse-alpha-free` (catalog-listed; chat-verify pending — the probe egress is quota-held to UTC midnight). Core models (big-pickle, beam, mimo, deepseek, glm, lightning, super-vl) confirmed alive through a community gateway reading the same upstream, and independently by 9router PR #5381 on the new v3 wire. **The 2026-11 gate turn**: free-tier requests must now carry the v2 CLI dev wire — UA `opencode/dev/<build>/opencode`, `x-opencode-client: opencode`, per-request `x-opencode-request`, all four session headers, `prompt_cache_key` bound to the session — and no tool declaration may contain the substring `terminal` (textual gate; such tools are aliased to `run_command` on the wire automatically). Direct OpenCode requests now use a fresh TLS connection each time: keep-alive socket reuse was letting one flagged (ip, session) pair poison every request riding that connection into a 429 cascade.
+**Sweep 2026-11-07**: added `iceman-free` (262K/131K) and `inkling-2-small-free` (1M/131K, vision); dropped `pulse-alpha-free` (gone from catalog, `400 Model is unavailable`). All **11** OpenCode free models chat-verified **HTTP 200** live from Node.js. **TLS ClientHello JA4 gate fix**: OpenCode's edge fingerprints the TLS ClientHello JA4 cipher-list hash (`5b57614c22b0`, BoringSSL/Bun order) and answers Node's default OpenSSL cipher list with a fake `429 FreeUsageLimitError` even on a clean IP. Direct OpenCode requests now pass `ciphers: OPENCODE_CIPHER_LIST` + `agent: false` on Node's built-in `https.request` (zero external dependencies). Also moved `prompt_cache_key` into the JSON body (was erroneously sent as an HTTP header in 0.8.0) and stopped trusting OpenCode's synthetic UTC-midnight `Retry-After` (~22 h) on transient 429s so a single burned session rotates cleanly instead of locking the model out for the day.
 
 **Muse note:** the muse-class models are 410-deprecated for now, but their Responses-API routing (`/v1/responses`) stays in place — if a muse-class id returns to the catalog it re-routes automatically, no code change needed.
 

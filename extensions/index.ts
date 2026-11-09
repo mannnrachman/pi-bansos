@@ -12,9 +12,6 @@ import path from "node:path";
 import { Readable } from "node:stream";
 import { StringDecoder } from "node:string_decoder";
 import { fileURLToPath } from "node:url";
-// Node ships undici internally; the import keeps the fresh-connection
-// dispatcher self-contained without a dependency entry.
-import { Agent } from "undici";
 import {
 	classifyUpstreamError,
 	retryAfterSeconds,
@@ -245,8 +242,6 @@ function opencodeHeaders(): Record<string, string> {
 		"X-Session-Id": session,
 		// v3 wire: per-request id is REQUIRED again (v2 had rejected it).
 		"x-opencode-request": generateRequestId(),
-		// v3 wire: cache key bound to the session (valid upstream cache routing).
-		prompt_cache_key: session,
 		// Distributed-tracing headers real opencode clients emit.
 		b3: `${traceId}-${spanId}-1-${spanId}`,
 		traceparent: `00-${traceId}-${spanId}-01`,
@@ -472,6 +467,9 @@ function transformOpencodeBody(
 		ensureEnvFingerprint(body, true);
 		return { body, responsesPath: true };
 	}
+	// v3 wire (9router #5381): chat completions bind prompt_cache_key to the
+	// session in the JSON body (never as an HTTP header).
+	body.prompt_cache_key = currentOpenCodeSession();
 	ensureChatFingerprintTools(body);
 	ensureEnvFingerprint(body, false);
 	return { body, responsesPath: false };
@@ -657,20 +655,97 @@ let aliveCatalog: RegisteredModel[] = [];
 // A 403 through a relay is attributed to the relay (its egress IP may be
 // flagged by OpenCode's IP gate — distinct from a fingerprint FreeTierError,
 // which 403s identically on every egress); it cools down and rolls once.
-// v3 wire (9router #5381): OpenCode direct requests use a FRESH TLS
-// connection each time — keep-alive socket reuse lets one flagged
-// (ip, session) poison every request riding that connection (429 cascade).
-const OPENCODE_FRESH_AGENT = new Agent({
-	keepAliveTimeout: 1,
-	keepAliveMaxTimeout: 1,
-	keepAliveTimeoutThreshold: 1,
-});
+// TLS ClientHello JA4 cipher-list gate (9router opencodeTlsClient.js, live-
+// verified 2026-11-07): OpenCode's edge keys on the TLS ClientHello JA4 cipher
+// hash (BoringSSL/Bun order: 5b57614c22b0). Node's default OpenSSL cipher list
+// is refused with 429 FreeUsageLimitError on every request even from a clean
+// IP with valid v3 headers/body. Passing this cipher list + agent: false to
+// Node's built-in https.request matches the BoringSSL JA4 cipher hash and
+// opens a fresh TLS connection each time with zero external dependencies.
+const OPENCODE_CIPHER_LIST = [
+	"TLS_AES_128_GCM_SHA256",
+	"TLS_AES_256_GCM_SHA384",
+	"TLS_CHACHA20_POLY1305_SHA256",
+	"ECDHE-ECDSA-AES128-GCM-SHA256",
+	"ECDHE-RSA-AES128-GCM-SHA256",
+	"ECDHE-ECDSA-AES256-GCM-SHA384",
+	"ECDHE-RSA-AES256-GCM-SHA384",
+	"ECDHE-ECDSA-CHACHA20-POLY1305",
+	"ECDHE-RSA-CHACHA20-POLY1305",
+	"ECDHE-ECDSA-AES128-SHA",
+	"ECDHE-RSA-AES128-SHA",
+	"ECDHE-ECDSA-AES256-SHA",
+	"ECDHE-RSA-AES256-SHA",
+	"AES128-GCM-SHA256",
+	"AES256-GCM-SHA384",
+	"AES128-SHA",
+	"AES256-SHA",
+].join(":");
 function opencodeDirectFetch(url: string, opts: RequestInit): Promise<Response> {
-	return fetch(url, {
-		...opts,
-		// undici dispatcher: opt out of the connection pool (types lag the option)
-		dispatcher: OPENCODE_FRESH_AGENT,
-	} as RequestInit);
+	return new Promise((resolve, reject) => {
+		const u = new URL(url);
+		const headers: Record<string, string> = {};
+		new Headers(opts.headers).forEach((v, k) => {
+			headers[k] = v;
+		});
+		const bodyBuf =
+			opts.body == null
+				? undefined
+				: Buffer.isBuffer(opts.body)
+					? opts.body
+					: typeof opts.body === "string"
+						? Buffer.from(opts.body)
+						: Buffer.from(opts.body as ArrayBuffer);
+		if (bodyBuf && !headers["content-length"]) {
+			headers["content-length"] = String(bodyBuf.length);
+		}
+		const req = https.request(
+			{
+				method: opts.method || "GET",
+				hostname: u.hostname,
+				port: Number(u.port) || 443,
+				path: `${u.pathname}${u.search}`,
+				headers,
+				agent: false,
+				ciphers: OPENCODE_CIPHER_LIST,
+			},
+			(res) => {
+				const status = res.statusCode ?? 502;
+				const resHeaders = new Headers();
+				for (const [k, v] of Object.entries(res.headers)) {
+					if (typeof v === "string") resHeaders.set(k, v);
+					else if (Array.isArray(v)) resHeaders.set(k, v.join(", "));
+				}
+				const nullBody = status === 204 || status === 205 || status === 304;
+				resolve(
+					new Response(
+						nullBody
+							? null
+							: (Readable.toWeb(res) as unknown as ReadableStream<Uint8Array>),
+						{
+							status,
+							statusText: res.statusMessage ?? "",
+							headers: resHeaders,
+						},
+					),
+				);
+			},
+		);
+		if (opts.signal) {
+			if (opts.signal.aborted) {
+				req.destroy(opts.signal.reason ?? new Error("Aborted"));
+				return;
+			}
+			opts.signal.addEventListener(
+				"abort",
+				() => req.destroy(opts.signal?.reason ?? new Error("Aborted")),
+				{ once: true },
+			);
+		}
+		req.on("error", reject);
+		if (bodyBuf) req.end(bodyBuf);
+		else req.end();
+	});
 }
 async function relayFetch(
 	url: string,
@@ -1034,12 +1109,12 @@ interface ModelDef {
 }
 
 // OpenCode Zen free models verified against the live catalog and inference APIs.
-// Sweep 2026-11-06 (live /zen/v1/models + community gateway /v1/models): 10
-// free ids. New: crouton-alpha-free, pulse-alpha-free (catalog-listed; chat-
-// verify pending — probe egress quota-locked to UTC midnight, 9router #5368).
-// Alive via community gateway reading the same upstream: big-pickle, beam,
-// mimo, nemotron-3.5-lightning, deepseek, glm, super-vl, flint (9router PR
-// #5381 independently verified big-pickle/mimo/deepseek 200 on the v2 wire).
+// Sweep 2026-11-07 (live /zen/v1/models + chat probes with OPENCODE_CIPHER_LIST):
+// ALL 11 free models verified HTTP 200 live on Node.js!
+// New today: iceman-free (262K/131K), inkling-2-small-free (1M/131K, vision).
+// Dropped: pulse-alpha-free (removed from /zen/v1/models, answers 400 "Model is
+// unavailable"). Limits synced with live /zen/v1/models metadata: beam-free
+// 1M/131K, crouton-alpha-free 1M/270K (vision), flint-40b-free 262K/65K.
 // Gone for good: muse-spark-1.2/1.3, space-bunny, ll-alpha (410),
 // minimax-m3.1-flash, nemotron-3-ultra, longcat, cat-jam, step-5,
 // ling-3.0/3.1 (400/absent). muse lane keeps /responses routing if one
@@ -1050,22 +1125,31 @@ const KNOWN_MODELS: ModelDef[] = [
 		id: "beam-free",
 		name: "Beam Free",
 		reasoning: true,
-		contextWindow: 262_144,
-		maxTokens: 65_536,
+		contextWindow: 1_048_576,
+		maxTokens: 131_072,
 	},
 	{
 		id: "crouton-alpha-free",
 		name: "Crouton Alpha Free",
 		reasoning: true,
-		contextWindow: 262_144,
-		maxTokens: 65_536,
+		contextWindow: 1_048_576,
+		maxTokens: 270_000,
+		input: ["text", "image"],
 	},
 	{
-		id: "pulse-alpha-free",
-		name: "Pulse Alpha Free",
+		id: "iceman-free",
+		name: "Iceman Free",
 		reasoning: true,
 		contextWindow: 262_144,
-		maxTokens: 65_536,
+		maxTokens: 131_072,
+	},
+	{
+		id: "inkling-2-small-free",
+		name: "Inkling 2 Small Free",
+		reasoning: true,
+		contextWindow: 1_048_576,
+		maxTokens: 131_072,
+		input: ["text", "image"],
 	},
 	{
 		id: "mimo-v2.6-flash-free",
@@ -1101,8 +1185,8 @@ const KNOWN_MODELS: ModelDef[] = [
 		id: "flint-40b-free",
 		name: "Flint 40B Free",
 		reasoning: true,
-		contextWindow: 200_000,
-		maxTokens: 32_768,
+		contextWindow: 262_144,
+		maxTokens: 65_536,
 	},
 	{
 		id: "glm-5.3-flash-free",
@@ -1303,15 +1387,30 @@ function noteUpstreamResponse(
 ): UpstreamErrorKind {
 	const kind = classifyUpstreamError(status, body);
 	if (kind === "quota") {
+		if (upstream === "opencode") {
+			// Burn and rotate the session ID when upstream rejects it with
+			// 429 FreeUsageLimitError (9router PR #5297 burnSessionId).
+			const fresh = generateSessionId();
+			if (OPENCODE_SESSION_RE.test(fresh)) {
+				openCodeSession = fresh;
+				openCodeSessionMintedAt = Date.now();
+			}
+		}
 		// Quota buckets are per egress. A 429 that survived relayFetch's
 		// rolling arrived from the direct fallback, so only direct answers
 		// cool the model — a healthy relay may hold its own budget.
 		if (via === "direct") {
-			upstreamHealth.recordQuotaFailure(
-				upstream,
-				model,
-				retryAfterSeconds(retryAfter),
-			);
+			const parsed = retryAfterSeconds(retryAfter);
+			// OpenCode attaches a synthetic Retry-After counting down to
+			// 00:00 UTC (~16-22 h) on every FreeUsageLimitError, including
+			// minute-long congestion waves and single burned sessions
+			// (9router #5297). Ignore multi-hour hints on OpenCode so one
+			// transient 429 never locks the model out for the whole day.
+			const hint =
+				upstream === "opencode" && parsed != null && parsed > 300
+					? null
+					: parsed;
+			upstreamHealth.recordQuotaFailure(upstream, model, hint);
 		}
 	} else if (kind === "ip-flagged") {
 		if (via === "direct") upstreamHealth.recordEgressFailure(upstream);
@@ -1830,6 +1929,8 @@ function startProxy(
 							port: 443,
 							path: directPath,
 							headers: fwd,
+							agent: false,
+							ciphers: OPENCODE_CIPHER_LIST,
 						},
 					(upstreamRes) => {
 						const status = upstreamRes.statusCode ?? 502;

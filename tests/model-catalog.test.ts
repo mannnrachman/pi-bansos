@@ -12,8 +12,8 @@ const { KNOWN_MODELS, KILO_MODELS, KILO_MODEL_IDS, modelsFromCache } = new Funct
   `${compiled}; return { KNOWN_MODELS, KILO_MODELS, KILO_MODEL_IDS, modelsFromCache };`,
 )();
 
-// 2026-11-06 sweep: the live free catalogs.
-const opencode = ["beam-free", "crouton-alpha-free", "flint-40b-free", "pulse-alpha-free", "mimo-v2.6-flash-free", "nemotron-3.5-lightning-free", "big-pickle", "deepseek-v4.1-flash-free", "glm-5.3-flash-free", "nemotron-3.5-super-vl-free"];
+// 2026-11-07 sweep: the live free catalogs.
+const opencode = ["beam-free", "crouton-alpha-free", "iceman-free", "inkling-2-small-free", "flint-40b-free", "mimo-v2.6-flash-free", "nemotron-3.5-lightning-free", "big-pickle", "deepseek-v4.1-flash-free", "glm-5.3-flash-free", "nemotron-3.5-super-vl-free"];
 const kilo = ["kilo-auto/free", "nvidia/nemotron-3-ultra-550b-a55b:free", "dots-studio/dots-3-note-preview:free", "cohere/north-mini-code:free", "nvidia/nemotron-3-nano-omni-30b-a3b-reasoning:free", "openrouter/free", "nvidia/nemotron-3.5-lightning:free", "nvidia/nemotron-3.5-super-vl:free"];
 
 test("live catalog ids all register and route to the right upstream", () => {
@@ -28,20 +28,21 @@ test("live catalog ids all register and route to the right upstream", () => {
     assert.equal(models.find((model: { id: string }) => model.id === id)?.source, "kilo");
     assert.equal(KILO_MODEL_IDS.has(id), true);
   }
-  assert.equal(new Set([...KNOWN_MODELS, ...KILO_MODELS].map((model: { id: string }) => model.id)).size, 18);
+  assert.equal(new Set([...KNOWN_MODELS, ...KILO_MODELS].map((model: { id: string }) => model.id)).size, 19);
   const swapped = modelsFromCache({ fetchedAt: 1, opencode: kilo, kilo: opencode });
   assert.equal(swapped.length, 1); // Only the existing pinned openrouter/free survives.
 });
 
-test("2026-11-06 sweep: dead models are dropped from the curated lists", () => {
+test("2026-11-07 sweep: dead models are dropped from the curated lists", () => {
   const gone = [
     "muse-spark-1.3-contributor-free", "muse-spark-1.2-contributor-free", // 410 deprecated
     "space-bunny-free", "ll-alpha-free", // 410 deprecated
     "step-5-preview-free", "ling-3.0-flash-fin-free", "ling-3.1-flash-free", // 400 unavailable
     "minimax-m3.1-flash-free", "nemotron-3-ultra-free", "longcat-2.5-preview-free", "cat-jam-free", // gone from catalog
+    "pulse-alpha-free", // 2026-11-07: gone from catalog, 400 Model is unavailable
     "stealth/glyph-cluster", "stealth/cat-jam", // 401 sign-in required
     "poolside/laguna-xs-2.1:free", // 429 shared pool, consistent
-    "liquid/lfm-2.5-2.6b:free", // 429/504 upstream, consistent
+    "liquid/lfm-2.5-2.6b:free", "liquid/lfm-3-1.7b:free", // 429/504 upstream, consistent
     "minimax/minimax-m3.1-flash:free", // 404 model gone
     "thinkingmachines/inkling-small:free", // 404 unavailable
     "recursive/flint-v1.0:free", // 2026-11-06: gone from catalog

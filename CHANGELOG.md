@@ -1,5 +1,15 @@
 # Changelog
 
+## [0.8.1] - 2026-11-07
+
+### Fixed
+- **TLS ClientHello JA4 cipher-list gate (`429 FreeUsageLimitError` on Node.js)**: OpenCode's edge fingerprints the TLS ClientHello JA4 cipher-list hash (`5b57614c22b0`, BoringSSL/Bun order — see 9router `opencodeTlsClient.js` and [#5297](https://github.com/decolua/9router/pull/5297)). In 0.8.0, the direct OpenCode path (`https.request`) sent Node's default OpenSSL cipher list, which the edge rejected on every request with a fake `429 FreeUsageLimitError` even on a clean IP, while `opencodeDirectFetch` passed an `undici@8` `Agent` incompatible with Node 22's built-in `fetch` (`UND_ERR_INVALID_ARG: invalid onRequestStart method`). Direct OpenCode requests now pass `ciphers: OPENCODE_CIPHER_LIST` and `agent: false` to Node's built-in `https.request` (matching the BoringSSL JA4 cipher hash with zero external dependencies; `undici` removed from `package.json`).
+- **`prompt_cache_key` placement**: moved `prompt_cache_key` out of `opencodeHeaders()` and into `transformOpencodeBody()` as a JSON body field on the chat completions path.
+- **Session rotation + synthetic `Retry-After` guard on OpenCode 429s** (9router [#5297](https://github.com/decolua/9router/pull/5297)): OpenCode attaches a synthetic `Retry-After` counting down to `00:00 UTC` (~16–22 h) on every `FreeUsageLimitError`, including minute-long congestion waves and single burned sessions. `noteUpstreamResponse` now immediately rotates `openCodeSession` on a 429 and ignores multi-hour (`> 300 s`) hints for OpenCode so a single transient 429 cools down for 90 s instead of wedging the model for the rest of the day.
+
+### Added
+- **Model sweep 2026-11-07** (all 11 OpenCode models live-verified HTTP 200 from Node.js): added `iceman-free` (262K ctx / 131K out, reasoning) and `inkling-2-small-free` (1M ctx / 131K out, vision + reasoning). Dropped `pulse-alpha-free` (removed from `/zen/v1/models`, answers `400 Model is unavailable`). Updated context/output limits from live `/zen/v1/models` metadata for `beam-free` (1M/131K), `crouton-alpha-free` (1M/270K, vision), and `flint-40b-free` (262K/65K). KiloCode's new `liquid/lfm-3-1.7b:free` probed 429 on shared pool and stays excluded. Catalog: 18 → 19 (11 OpenCode + 8 KiloCode).
+
 ## [0.8.0] - 2026-11-06
 
 ### Added

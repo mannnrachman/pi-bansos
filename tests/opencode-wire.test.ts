@@ -32,7 +32,7 @@ test("v3 wire: UA is a dev-wire stamp, overridable via env", () => {
   delete process.env.BANSOS_OPENCODE_UA;
 });
 
-test("v3 wire: all four session headers + per-request id + cache key + client id", () => {
+test("v3 wire: all four session headers + per-request id + client id (prompt_cache_key in body, not headers)", () => {
   const h = opencodeHeaders();
   const session = h["x-opencode-session"];
   assert.equal(h["x-opencode-client"], "opencode"); // was "desktop"
@@ -40,10 +40,14 @@ test("v3 wire: all four session headers + per-request id + cache key + client id
   assert.equal(h["x-session-affinity"], session);
   assert.equal(h["X-Session-Id"], session); // the capitalized fourth
   assert.match(h["x-opencode-request"] ?? "", /^msg_[0-9A-Za-z]+$/); // required again
-  assert.equal(h.prompt_cache_key, session); // bound to the session
+  assert.equal("prompt_cache_key" in h, false); // body field, never HTTP header
   assert.match(h["x-opencode-project"] ?? "", /^[0-9a-f]{40}$/); // per-boot hex
   // Two calls mint distinct request ids on the same session.
   assert.notEqual(opencodeHeaders()["x-opencode-request"], h["x-opencode-request"]);
+  // BoringSSL JA4 cipher list is wired onto direct https.request calls.
+  assert.ok(source.includes('ciphers: OPENCODE_CIPHER_LIST'));
+  assert.ok(source.includes("TLS_AES_128_GCM_SHA256"));
+  assert.ok(source.includes("body.prompt_cache_key = currentOpenCodeSession()"));
 });
 
 // ── Tool aliasing: "terminal" textual gate (9router #5328) ──────────────────
