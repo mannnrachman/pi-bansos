@@ -10,6 +10,7 @@ Free model provider for **[pi](https://pi.dev)** ([browse packages](https://pi.d
 
 - [Features](#features)
 - [Models](#models)
+- [Requirements](#requirements)
 - [Install](#install)
 - [Update](#update)
 - [Usage](#usage)
@@ -78,6 +79,18 @@ Keyless — 200 requests/hour per IP. No `Authorization` header is sent; the fre
 **Sweep 2026-11-06**: all 8 survivors chat-verified 200. Kilo's NVIDIA free endpoints may retain prompts or use them for training; do not send confidential data.
 
 Rate limiting is separated internally by upstream: OpenCode uses its UTC-day local guard and its own upstream free quota; Kilo uses a rolling-hour local guard matching its documented 200/hour/IP limit.
+
+## Requirements
+
+Nothing extra is required for normal usage — install in `pi` or `OMP` and pick a model. Optional egress modes have minimal prerequisites:
+
+| Mode                              | What you need to prepare                                                                                                                                           | Needed?  |
+| --------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------ | -------- |
+| **Default (Direct)**              | **[pi](https://pi.dev)** (Node.js) or **OMP (Oh My Pi)** (Bun). **No** API key, **no** account, **no** extra binaries.                                             | Required |
+| **WARP `/64` Hop** (`/bansos warp on`) | **Nothing manual** — **no** Cloudflare account/token, **no** `warp-cli` app, **no** `sudo`/root, and **no** native IPv6 ISP needed. Linux/macOS/Windows (`x64`/`arm64`) with outbound UDP `2408` open; `wgcf` + `wireproxy` are auto-downloaded & SHA-256-verified on first use (or bring your own via `WARP_WGCF_PATH` / `WARP_WIREPROXY_PATH`). | Optional |
+| **Cloud Relay** (`/bansos deploy`) | A free **Cloudflare** account + *Edit Cloudflare Workers* API token (no credit card), or a **Vercel** API token — useful on networks blocking WireGuard UDP or for KiloCode egress diversity. | Optional |
+| **Custom Proxy** (`BANSOS_OPENCODE_PROXY`) | Any HTTP `CONNECT` proxy URL (`http://host:port` or `http://user:pass@host:port`).                                                                                | Optional |
+| **Running tests** (maintainers)   | Node.js `>= 22.6` (`npm test`) or Bun (`bun test`), zero extra npm packages.                                                                                       | Dev only |
 
 ## Install
 
