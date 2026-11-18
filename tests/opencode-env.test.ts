@@ -3,14 +3,14 @@ import { readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { test } from "node:test";
-import { Transpiler } from "bun";
+import { transpileTs } from "./_transpile.ts";
 
 // Exercise the real <env> fingerprint helpers without loading the extension.
 const source = readFileSync(new URL("../extensions/index.ts", import.meta.url), "utf8");
 const start = source.indexOf("// v2 gate (2026-10-25");
 const end = source.indexOf("/** Rewrite OpenCode free-tier request body");
 assert.ok(start >= 0 && end > start);
-const compiled = new Transpiler({ loader: "ts", target: "node" }).transformSync(source.slice(start, end));
+const compiled = transpileTs(source.slice(start, end));
 const { ensureEnvFingerprint, ENV_FINGERPRINT_NOTE } = new Function(
   "path", "tmpdir", `${compiled}; return { ensureEnvFingerprint, ENV_FINGERPRINT_NOTE };`,
 )(path, tmpdir);

@@ -24,7 +24,12 @@
  * the upstream itself reported, keyed by what it meters.
  */
 
-export type UpstreamErrorKind = "quota" | "ip-flagged" | "shape-gate" | "other";
+export type UpstreamErrorKind =
+	| "overload"
+	| "quota"
+	| "ip-flagged"
+	| "shape-gate"
+	| "other";
 
 /** Classify an upstream error response from its status + body text. */
 export function classifyUpstreamError(
@@ -34,6 +39,10 @@ export function classifyUpstreamError(
 	const text = body ?? "";
 	if (status === 403 && /abusive traffic/i.test(text)) return "ip-flagged";
 	if (status === 403 && /FreeTierError/i.test(text)) return "shape-gate";
+	// 9router #5583: transient free-lane load shedding ("The inference service
+	// is overloaded. Please try again later.") is retryable and must not wedge
+	// the model in a quota cooldown or burn a healthy session.
+	if (status === 429 && /\boverloaded\b/i.test(text)) return "overload";
 	if (status === 429) return "quota";
 	if (
 		/FreeUsageLimitError|Free usage limit|rate_limit_error|Rate limit exceeded/i.test(

@@ -12,12 +12,15 @@ const quota429 =
 	'{"type":"error","error":{"type":"FreeUsageLimitError","message":"Free usage limit reached. Subscribe to OpenCode Go to keep going: https://opencode.ai/go"}}';
 const rateLimit429 =
 	'{"code":null,"message":"OpenCode Zen: Rate limit exceeded. Please try again later.","param":null,"type":"rate_limit_error"}';
+const overload429 =
+	'{"error":{"type":"server_error","message":"The inference service is overloaded. Please try again later."}}';
 const ipFlag403 =
 	'{"type":"error","error":{"type":"FreeTierError","message":"OpenCode\'s free models aren\'t available from your current network because we\'ve detected abusive traffic from this IP address. This isn\'t related to your account."}}';
 const shapeGate403 =
 	'{"type":"error","error":{"type":"FreeTierError","message":"OpenCode\'s free tier can only be used from within OpenCode. Download it at https://opencode.ai and keep building."}}';
 
-test("classifies the four upstream error axes from real bodies", () => {
+test("classifies the upstream error axes from real bodies (incl. transient 429 overload)", () => {
+	assert.equal(classifyUpstreamError(429, overload429), "overload");
 	assert.equal(classifyUpstreamError(429, quota429), "quota");
 	assert.equal(classifyUpstreamError(429, rateLimit429), "quota");
 	assert.equal(classifyUpstreamError(429, ""), "quota");

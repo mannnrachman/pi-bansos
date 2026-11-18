@@ -1,5 +1,23 @@
 # Changelog
 
+## [0.9.0] - 2026-11-18
+
+### Added
+- **Userspace Cloudflare WARP `/64` outbound hop engine (`extensions/warp-hop.ts`)** (adapted from [openhop](https://openhop.cfd/source/) & 9router [#5727](https://github.com/decolua/9router/pull/5727)): optional zero-account, no-root egress rotation for OpenCode free-tier quota (`429 FreeUsageLimitError`) and IP-block (`403 abusive traffic`) walls in both **pi** and **OMP**.
+  - `/bansos warp setup` downloads official `ViRb3/wgcf` and `windtf/wireproxy` releases into `<agentStateDir>/bansos-warp/bin/` (`~/.pi/agent/` or `~/.omp/agent/`), verifies SHA-256 against release `checksums.txt`, and unpacks `.tar.gz` in pure Node/Bun with zero external dependencies.
+  - `normalizeWireguardProfile` splits `wgcf`'s comma-joined `Address`/`DNS` lines for `wireproxy` compatibility and pins the tunnel interface to dedicated **IPv6 `/64`** (`Address`, `DNS`, `AllowedIPs`) — avoiding WARP's shared `/24` IPv4 CGNAT pool even on IPv4-only host networks, while keeping host browser/system traffic untouched.
+  - `openProxyTlsTunnel` + `tlsCustomFetch` tunnel HTTPS over `127.0.0.1:42901` (`HTTP CONNECT`) and negotiate TLS explicitly with `OPENCODE_CIPHER_LIST`, preserving OpenCode's required BoringSSL JA4 fingerprint (`5b57614c22b0`) through the proxy.
+  - Automatic `/64` hop + session burn & transparent request retry (up to `maxHops = 2` per turn, 45 s cooldown between hops, `wgcf-account.toml.bak` rollback on registration failure) when `/bansos warp on` is active; manual rotation anytime via `/bansos warp hop`. Also supports custom proxy URLs via `BANSOS_OPENCODE_PROXY`.
+- **Bypass all 5 OpenCode client-fingerprint gates** (9router [#5725](https://github.com/decolua/9router/pull/5725) / [#5690](https://github.com/decolua/9router/issues/5690)):
+  - **Gate 1 (per-client session isolation)**: `openCodeSessions` now isolates `ses_…` pools per downstream client (`User-Agent` + auth digest, or native `x-opencode-session`) with value-matched eviction (`burnOpenCodeSession`) so multiple apps sharing one proxy port no longer exhaust a single session pool.
+  - **Gates 3 & 5 (Claude Code & Codex pair gates)**: added `ReportFindings` (paired with `ScheduleWakeup`/`DeferredToolPlaceholder`) and `exec_command` (paired with `write_stdin`) to `GATED_TOOL_NAME_RE` (`run_command*` wire aliases).
+  - **Gate 4 (name+schema fingerprints)**: added `GATED_NAME_SCHEMA_RULES` concealing `Edit`/`edit` (`old_string`/`new_string` → `file_edit`) and case-sensitive `Read` (`file_path` → `file_read`).
+- **Transient `429 overloaded` classification & auto-retry** (9router [#5583](https://github.com/decolua/9router/pull/5583)): `classifyUpstreamError` now distinguishes `429 "The inference service is overloaded"` (`"overload"`) from real quota 429s. Transient overload responses are retried automatically in-place (up to 8 attempts, `800 → 4000 ms` abortable backoff) without burning the session or locking the model into a 90 s–15 min quota cooldown.
+
+### Fixed
+- **Non-`_pi` tool-alias restoration & multi-turn history rewriting**: `pipeUpstreamStream` and non-stream responses previously matched only `/([A-Za-z0-9_-]+)_pi\b/g`, leaving `run_command`/`run_command_2` aliases un-restored on tool calls. `buildAliasRestorer` now restores all wire aliases (`*_pi`, `run_command*`, `file_edit*`, `file_read*`) longest-first across arbitrary SSE byte splits, and `aliasChatHistoryToolCalls` / `aliasResponsesHistoryItems` rewrite prior-turn `tool_calls` and `function_call` items back to their wire aliases on follow-up turns.
+- **Node ESM + Bun dual-runtime test & module resolution**: explicit `.ts` relative specifiers in `extensions/index.ts` and a shared `tests/_transpile.ts` helper (`module.stripTypeScriptTypes` with `Bun.Transpiler` fallback) let the entire 33-test suite run natively under both `npm test` (`node --test`) and `bun test` (`omp`).
+
 ## [0.8.1] - 2026-11-07
 
 ### Fixed

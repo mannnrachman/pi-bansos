@@ -17,7 +17,12 @@ import {
 	retryAfterSeconds,
 	UpstreamHealth,
 	type UpstreamErrorKind,
-} from "./upstream-health";
+} from "./upstream-health.ts";
+import {
+	DEFAULT_MAX_HOPS,
+	tlsCustomFetch,
+	WarpHopEngine,
+} from "./warp-hop.ts";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 
 // ── Configuration ──────────────────────────────────────────────────
@@ -151,26 +156,115 @@ function generateRequestId(timestamp = Date.now()): string {
 	return `msg_${timeHexFrom(current)}${unstableRandom()}`;
 }
 
-// One stable session per conversation window — shape must match
+// One stable session per downstream client identity — shape must match
 // OPENCODE_SESSION_RE. Upstream decodes the embedded timestamp and 429s
-// sessions older than ~30 days (9router #5222, live-probed: -34d → 200,
-// -100d → 429), so a long-lived pi/OMP process re-mints its session weekly —
-// well inside the window — and keeps prompt-cache affinity the rest of the time.
+// sessions older than ~30 days (9router #5222), so each session re-mints
+// weekly. Isolating by client identity (9router #5725) stops multiple apps
+// sharing one local proxy port from exhausting a single upstream session pool.
 const SESSION_MAX_AGE_MS = 7 * 24 * 60 * 60_000;
-let openCodeSession = generateSessionId();
-let openCodeSessionMintedAt = Date.now();
-if (!OPENCODE_SESSION_RE.test(openCodeSession)) {
-	throw new Error("opencode session id generation failed shape check");
-}
-function currentOpenCodeSession(): string {
-	if (Date.now() - openCodeSessionMintedAt > SESSION_MAX_AGE_MS) {
-		const fresh = generateSessionId();
-		if (OPENCODE_SESSION_RE.test(fresh)) {
-			openCodeSession = fresh;
-			openCodeSessionMintedAt = Date.now();
-		}
+const SESSION_CACHE_CAP = 256;
+type SessionEntry = { session: string; mintedAt: number; lastUsedAt: number };
+const openCodeSessions = new Map<string, SessionEntry>();
+{
+	const seed = generateSessionId();
+	if (!OPENCODE_SESSION_RE.test(seed)) {
+		throw new Error("opencode session id generation failed shape check");
 	}
-	return openCodeSession;
+	const now = Date.now();
+	openCodeSessions.set("default", {
+		session: seed,
+		mintedAt: now,
+		lastUsedAt: now,
+	});
+}
+
+/** Deterministic 64-bit FNV-1a hex digest (zero external deps for slice tests). */
+function fnv1a64Hex(input: string): string {
+	let h = 0xcbf29ce484222325n;
+	const prime = 0x100000001b3n;
+	const mask = 0xffffffffffffffffn;
+	for (let i = 0; i < input.length; i++) {
+		h ^= BigInt(input.charCodeAt(i));
+		h = (h * prime) & mask;
+	}
+	return h.toString(16).padStart(16, "0");
+}
+
+function clientSessionKey(
+	headers?: Record<string, string | string[] | undefined>,
+): string {
+	if (!headers) return "default";
+	const getHeader = (target: string): string => {
+		for (const [k, v] of Object.entries(headers)) {
+			if (k.toLowerCase() !== target) continue;
+			if (typeof v === "string") return v.trim();
+			if (Array.isArray(v)) return v.join(", ").trim();
+		}
+		return "";
+	};
+	const native = getHeader("x-opencode-session");
+	if (native && OPENCODE_SESSION_RE.test(native)) return `native:${native}`;
+	const ua = getHeader("user-agent");
+	const auth = getHeader("authorization") || getHeader("x-api-key");
+	if (!ua && !auth) return "default";
+	return `client:${fnv1a64Hex(`${ua}\0${auth}`)}`;
+}
+
+function currentOpenCodeSession(clientKey = "default"): string {
+	if (clientKey.startsWith("native:")) {
+		const native = clientKey.slice("native:".length);
+		if (OPENCODE_SESSION_RE.test(native)) return native;
+	}
+	const now = Date.now();
+	const existing = openCodeSessions.get(clientKey);
+	if (existing && now - existing.mintedAt <= SESSION_MAX_AGE_MS) {
+		existing.lastUsedAt = now;
+		return existing.session;
+	}
+	const fresh = generateSessionId(now);
+	if (!OPENCODE_SESSION_RE.test(fresh)) {
+		return existing?.session ?? openCodeSessions.get("default")!.session;
+	}
+	if (!openCodeSessions.has(clientKey) && openCodeSessions.size >= SESSION_CACHE_CAP) {
+		let oldestKey: string | null = null;
+		let oldestTs = Infinity;
+		for (const [k, v] of openCodeSessions) {
+			if (k === "default") continue;
+			if (v.lastUsedAt < oldestTs) {
+				oldestTs = v.lastUsedAt;
+				oldestKey = k;
+			}
+		}
+		if (oldestKey) openCodeSessions.delete(oldestKey);
+	}
+	openCodeSessions.set(clientKey, {
+		session: fresh,
+		mintedAt: now,
+		lastUsedAt: now,
+	});
+	return fresh;
+}
+
+function burnOpenCodeSession(
+	clientKey = "default",
+	rejectedSession?: string,
+): string {
+	if (clientKey.startsWith("native:")) return clientKey.slice("native:".length);
+	const existing = openCodeSessions.get(clientKey);
+	if (rejectedSession && existing && existing.session !== rejectedSession) {
+		return existing.session;
+	}
+	const now = Date.now();
+	const fresh = generateSessionId(now);
+	if (OPENCODE_SESSION_RE.test(fresh)) {
+		openCodeSessions.set(clientKey, {
+			session: fresh,
+			mintedAt: now,
+			lastUsedAt: now,
+		});
+		return fresh;
+	}
+	return existing?.session ?? currentOpenCodeSession("default");
 }
 
 // Live UA resolution — offline-safe, never throws, never blocks.
@@ -224,10 +318,10 @@ async function refreshOpenCodeUA(): Promise<void> {
 	}
 }
 
-function opencodeHeaders(): Record<string, string> {
+function opencodeHeaders(clientKey = "default"): Record<string, string> {
 	const traceId = randomBytes(16).toString("hex");
 	const spanId = randomBytes(8).toString("hex");
-	const session = currentOpenCodeSession();
+	const session = currentOpenCodeSession(clientKey);
 	const headers: Record<string, string> = {
 		"User-Agent": getOpenCodeUA(),
 		Authorization: "Bearer public",
@@ -266,37 +360,172 @@ function toolNameOf(tool: unknown): string {
 	return raw.trim();
 }
 
-function ensureChatFingerprintTools(body: Record<string, unknown>): void {
-	if (!Array.isArray(body.tools)) body.tools = [];
-	// 1) Alias caller tools whose names collide with real opencode tools —
-	// the v2 gate 403s a payload carrying e.g. `bash` next to the exact pair.
-	// v3 (2026-11, 9router #5328): the gate ALSO 429s any declared tool name
-	// containing the substring "terminal" (case-insensitive, textual check on
-	// the declaration alone) — those get the same alias treatment.
-	// `*_pi` on the wire; model replies referencing `bash_pi` are mapped back
-	// in the response path (stripResponseAliases).
+// 9router #5328 + #5690 + #5725: upstream textually inspects declared tools[]
+// and instant-429s FreeUsageLimitError on:
+// - Gate 2: any tool name containing "terminal" (case-insensitive)
+// - Gate 3: Claude Code pair ReportFindings + (ScheduleWakeup | DeferredToolPlaceholder)
+// - Gate 5: Codex pair exec_command + write_stdin
+// Concealing the common member (`ReportFindings`, `exec_command`) alongside
+// `terminal` clears all three gates under one alias family (`run_command*`).
+const GATED_TOOL_NAME_RE = /terminal|reportfindings|exec_command/i;
+
+// Gate 4 (9router #5725): name+schema fingerprints. /^Read$/ is case-sensitive.
+const GATED_NAME_SCHEMA_RULES: ReadonlyArray<{
+	re: RegExp;
+	props: readonly string[];
+	alias: string;
+}> = [
+	{ re: /^edit$/i, props: ["old_string", "new_string"], alias: "file_edit" },
+	{ re: /^Read$/, props: ["file_path"], alias: "file_read" },
+];
+
+function declaredToolProps(tool: unknown): string[] {
+	if (!tool || typeof tool !== "object" || Array.isArray(tool)) return [];
+	const t = tool as Record<string, unknown>;
+	const fn =
+		t.function && typeof t.function === "object" && !Array.isArray(t.function)
+			? (t.function as Record<string, unknown>)
+			: null;
+	const params = (fn ? fn.parameters : t.parameters) as
+		| Record<string, unknown>
+		| undefined;
+	const props = params?.properties;
+	if (!props || typeof props !== "object" || Array.isArray(props)) return [];
+	return Object.keys(props as Record<string, unknown>);
+}
+
+function gatedNameSchemaBaseAlias(tool: unknown, name: string): string {
+	const props = declaredToolProps(tool);
+	for (const rule of GATED_NAME_SCHEMA_RULES) {
+		if (!rule.re.test(name)) continue;
+		if (rule.props.some((prop) => props.includes(prop))) return rule.alias;
+	}
+	return "";
+}
+
+function uniqueWireAlias(base: string, taken: Set<string>): string {
+	let candidate = base;
+	let n = 2;
+	while (taken.has(candidate) || OPENCODE_TOOL_NAMES.has(candidate.toLowerCase())) {
+		candidate = `${base}_${n++}`;
+	}
+	taken.add(candidate);
+	return candidate;
+}
+
+function aliasCallerTools(
+	tools: unknown[],
+	responsesShape: boolean,
+): { tools: unknown[]; wireToCaller: Map<string, string>; callerToWire: Map<string, string> } {
 	const wireToCaller = new Map<string, string>();
-	let aliasCounter = 0;
-	body.tools = (body.tools as unknown[]).map((tool) => {
+	const callerToWire = new Map<string, string>();
+	const taken = new Set<string>();
+	for (const tool of tools) {
+		const n = toolNameOf(tool);
+		if (n) taken.add(n);
+	}
+	const mapped = tools.map((tool) => {
 		const name = toolNameOf(tool);
 		if (!name) return tool;
 		const lower = name.toLowerCase();
-		const gated =
-			OPENCODE_TOOL_NAMES.has(lower) || lower.includes("terminal");
-		if (!gated) return tool;
-		const alias = OPENCODE_TOOL_NAMES.has(lower)
-			? `${name}_pi`
-			: `run_command${aliasCounter++ ? `_${aliasCounter}` : ""}`;
+		const schemaGateBase = gatedNameSchemaBaseAlias(tool, name);
+		const regexGated = GATED_TOOL_NAME_RE.test(name);
+		const collides = OPENCODE_TOOL_NAMES.has(lower);
+		if (!schemaGateBase && !regexGated && !collides) return tool;
+
+		const base = schemaGateBase
+			? schemaGateBase
+			: regexGated
+				? "run_command"
+				: `${name}_pi`;
+		const alias = uniqueWireAlias(base, taken);
 		wireToCaller.set(alias, name);
+		callerToWire.set(name, alias);
 		if (tool && typeof tool === "object" && !Array.isArray(tool)) {
-			const t = tool as Record<string, unknown>;
-			if (t.function && typeof t.function === "object")
-				(t.function as Record<string, unknown>).name = alias;
-			else if (typeof t.name === "string") t.name = alias;
+			const cloned = structuredClone(tool) as Record<string, unknown>;
+			if (
+				!responsesShape &&
+				cloned.function &&
+				typeof cloned.function === "object" &&
+				!Array.isArray(cloned.function)
+			) {
+				(cloned.function as Record<string, unknown>).name = alias;
+			} else if (typeof cloned.name === "string") {
+				cloned.name = alias;
+			} else if (
+				cloned.function &&
+				typeof cloned.function === "object" &&
+				!Array.isArray(cloned.function)
+			) {
+				(cloned.function as Record<string, unknown>).name = alias;
+			}
+			return cloned;
 		}
 		return tool;
 	});
-	if (wireToCaller.size) body.__bansosToolAliases = Object.fromEntries(wireToCaller);
+	return { tools: mapped, wireToCaller, callerToWire };
+}
+
+function aliasChatHistoryToolCalls(
+	body: Record<string, unknown>,
+	callerToWire: Map<string, string>,
+): void {
+	if (!callerToWire.size || !Array.isArray(body.messages)) return;
+	for (const msg of body.messages as unknown[]) {
+		if (!msg || typeof msg !== "object" || Array.isArray(msg)) continue;
+		const m = msg as Record<string, unknown>;
+		if (Array.isArray(m.tool_calls)) {
+			for (const tc of m.tool_calls as unknown[]) {
+				if (!tc || typeof tc !== "object" || Array.isArray(tc)) continue;
+				const fn = (tc as Record<string, unknown>).function;
+				if (fn && typeof fn === "object" && !Array.isArray(fn)) {
+					const fnRec = fn as Record<string, unknown>;
+					if (typeof fnRec.name === "string" && callerToWire.has(fnRec.name)) {
+						fnRec.name = callerToWire.get(fnRec.name)!;
+					}
+				}
+			}
+		}
+		if (
+			(m.role === "tool" || m.role === "function") &&
+			typeof m.name === "string" &&
+			callerToWire.has(m.name)
+		) {
+			m.name = callerToWire.get(m.name)!;
+		}
+	}
+}
+
+function aliasResponsesHistoryItems(
+	body: Record<string, unknown>,
+	callerToWire: Map<string, string>,
+): void {
+	if (!callerToWire.size || !Array.isArray(body.input)) return;
+	for (const item of body.input as unknown[]) {
+		if (!item || typeof item !== "object" || Array.isArray(item)) continue;
+		const it = item as Record<string, unknown>;
+		if (
+			it.type === "function_call" &&
+			typeof it.name === "string" &&
+			callerToWire.has(it.name)
+		) {
+			it.name = callerToWire.get(it.name)!;
+		}
+	}
+}
+
+function ensureChatFingerprintTools(body: Record<string, unknown>): void {
+	if (!Array.isArray(body.tools)) body.tools = [];
+	// 1) Alias gated/colliding caller tools and rewrite prior-turn tool_calls
+	// in history; reply-side pipeUpstreamStream maps wire names back to caller.
+	const { tools, wireToCaller, callerToWire } = aliasCallerTools(
+		body.tools as unknown[],
+		false,
+	);
+	body.tools = tools;
+	aliasChatHistoryToolCalls(body, callerToWire);
+	if (wireToCaller.size)
+		body.__bansosToolAliases = Object.fromEntries(wireToCaller);
 	// 2) Append the exact opencode read+shell definitions (skipping any that
 	// the caller already declared verbatim — the alias pass renames those).
 	const present = new Set<string>();
@@ -311,32 +540,19 @@ function ensureChatFingerprintTools(body: Record<string, unknown>): void {
 }
 
 function ensureResponsesFingerprintTools(body: Record<string, unknown>): void {
-	// Same "terminal" textual gate applies on the responses surface — alias
-	// those (and colliding names) exactly like the chat path.
-	const wireToCaller = new Map<string, string>();
-	let aliasCounter = 0;
-	if (Array.isArray(body.tools)) {
-		body.tools = (body.tools as unknown[]).map((tool) => {
-			const name = toolNameOf(tool);
-			if (!name) return tool;
-			const lower = name.toLowerCase();
-			if (!OPENCODE_TOOL_NAMES.has(lower) && !lower.includes("terminal"))
-				return tool;
-			const alias = OPENCODE_TOOL_NAMES.has(lower)
-				? `${name}_pi`
-				: `run_command${aliasCounter++ ? `_${aliasCounter}` : ""}`;
-			wireToCaller.set(alias, name);
-			if (tool && typeof tool === "object" && !Array.isArray(tool)) {
-				const t = tool as Record<string, unknown>;
-				if (typeof t.name === "string") t.name = alias;
-			}
-			return tool;
-		});
-	}
+	if (!Array.isArray(body.tools)) body.tools = [];
+	// Same fingerprint gates apply on the responses surface — alias declarations
+	// and prior-turn function_call items identically to the chat path.
+	const { tools, wireToCaller, callerToWire } = aliasCallerTools(
+		body.tools as unknown[],
+		true,
+	);
+	body.tools = tools;
+	aliasResponsesHistoryItems(body, callerToWire);
 	if (wireToCaller.size)
 		body.__bansosToolAliases = Object.fromEntries(wireToCaller);
 	const present = new Set<string>();
-	for (const tool of (body.tools ?? []) as unknown[]) {
+	for (const tool of body.tools as unknown[]) {
 		const name = toolNameOf(tool);
 		if (name) present.add(name);
 	}
@@ -448,6 +664,7 @@ function ensureEnvFingerprint(
  * muse-class Responses models, else chat completions under the inbound path). */
 function transformOpencodeBody(
 	body: Record<string, unknown>,
+	clientKey?: string,
 ): { body: Record<string, unknown>; responsesPath: boolean } {
 	// Gate: stream:false → 403 even with valid UA/session/tools.
 	body.stream = true;
@@ -470,6 +687,7 @@ function transformOpencodeBody(
 	// v3 wire (9router #5381): chat completions bind prompt_cache_key to the
 	// session in the JSON body (never as an HTTP header).
 	body.prompt_cache_key = currentOpenCodeSession();
+	if (clientKey) body.prompt_cache_key = currentOpenCodeSession(clientKey);
 	ensureChatFingerprintTools(body);
 	ensureEnvFingerprint(body, false);
 	return { body, responsesPath: false };
@@ -533,21 +751,45 @@ type KnownRelay = {
 };
 // TUI status-bar entry for the relay/proxy state; display preference only.
 type StatusBar = "shown" | "hidden";
+type WarpConfig = {
+	enabled: boolean;
+	proxyUrl?: string;
+	autoHop?: boolean;
+	maxHops?: number;
+};
 type RelayState = {
 	enabled: boolean;
 	url: string;
 	relays: KnownRelay[];
 	statusBar: StatusBar;
+	warp?: WarpConfig;
 };
 function loadRelayState(): RelayState {
 	try {
 		const s = JSON.parse(fs.readFileSync(RELAY_STATE_FILE, "utf8"));
 		const relays: KnownRelay[] = Array.isArray(s?.relays) ? s.relays : [];
+		const rawWarp =
+			s?.warp && typeof s.warp === "object" && !Array.isArray(s.warp)
+				? (s.warp as Record<string, unknown>)
+				: null;
+		const warp: WarpConfig | undefined = rawWarp
+			? {
+					enabled: Boolean(rawWarp.enabled),
+					...(typeof rawWarp.proxyUrl === "string" && rawWarp.proxyUrl.trim()
+						? { proxyUrl: rawWarp.proxyUrl.trim() }
+						: {}),
+					autoHop: rawWarp.autoHop !== false,
+					...(typeof rawWarp.maxHops === "number" && rawWarp.maxHops > 0
+						? { maxHops: Math.floor(rawWarp.maxHops) }
+						: {}),
+				}
+			: undefined;
 		return {
 			enabled: Boolean(s?.enabled),
 			url: typeof s?.url === "string" ? s.url.trim() : "",
 			relays,
 			statusBar: s?.statusBar === "hidden" ? "hidden" : "shown",
+			...(warp ? { warp } : {}),
 		};
 	} catch {
 		return { enabled: false, url: "", relays: [], statusBar: "shown" };
@@ -599,6 +841,26 @@ function resolveRelayState(): RelayState {
 }
 let relayState: RelayState = resolveRelayState();
 let relayHits = 0;
+let warpHits = 0;
+
+// Userspace WARP /64 hop engine (wgcf + wireproxy on 127.0.0.1:42901).
+const warpEngine = new WarpHopEngine({
+	dataDir: (() => {
+		try {
+			return path.join(agentStateDir(), "bansos-warp");
+		} catch {
+			return path.join(
+				path.dirname(fileURLToPath(import.meta.url)),
+				"..",
+				".bansos-warp",
+			);
+		}
+	})(),
+	onLog: (level, msg, meta) => log(level, msg, meta),
+});
+process.once("exit", () => {
+	void warpEngine.stop();
+});
 
 // ── Relay pool health & failover ───────
 // A relay that 429s is out of quota for now. Vercel relays share one NAT
@@ -681,70 +943,14 @@ const OPENCODE_CIPHER_LIST = [
 	"AES128-SHA",
 	"AES256-SHA",
 ].join(":");
-function opencodeDirectFetch(url: string, opts: RequestInit): Promise<Response> {
-	return new Promise((resolve, reject) => {
-		const u = new URL(url);
-		const headers: Record<string, string> = {};
-		new Headers(opts.headers).forEach((v, k) => {
-			headers[k] = v;
-		});
-		const bodyBuf =
-			opts.body == null
-				? undefined
-				: Buffer.isBuffer(opts.body)
-					? opts.body
-					: typeof opts.body === "string"
-						? Buffer.from(opts.body)
-						: Buffer.from(opts.body as ArrayBuffer);
-		if (bodyBuf && !headers["content-length"]) {
-			headers["content-length"] = String(bodyBuf.length);
-		}
-		const req = https.request(
-			{
-				method: opts.method || "GET",
-				hostname: u.hostname,
-				port: Number(u.port) || 443,
-				path: `${u.pathname}${u.search}`,
-				headers,
-				agent: false,
-				ciphers: OPENCODE_CIPHER_LIST,
-			},
-			(res) => {
-				const status = res.statusCode ?? 502;
-				const resHeaders = new Headers();
-				for (const [k, v] of Object.entries(res.headers)) {
-					if (typeof v === "string") resHeaders.set(k, v);
-					else if (Array.isArray(v)) resHeaders.set(k, v.join(", "));
-				}
-				const nullBody = status === 204 || status === 205 || status === 304;
-				resolve(
-					new Response(
-						nullBody
-							? null
-							: (Readable.toWeb(res) as unknown as ReadableStream<Uint8Array>),
-						{
-							status,
-							statusText: res.statusMessage ?? "",
-							headers: resHeaders,
-						},
-					),
-				);
-			},
-		);
-		if (opts.signal) {
-			if (opts.signal.aborted) {
-				req.destroy(opts.signal.reason ?? new Error("Aborted"));
-				return;
-			}
-			opts.signal.addEventListener(
-				"abort",
-				() => req.destroy(opts.signal?.reason ?? new Error("Aborted")),
-				{ once: true },
-			);
-		}
-		req.on("error", reject);
-		if (bodyBuf) req.end(bodyBuf);
-		else req.end();
+function opencodeDirectFetch(
+	url: string,
+	opts: RequestInit,
+	proxyUrl?: string,
+): Promise<Response> {
+	return tlsCustomFetch(url, opts, {
+		proxyUrl,
+		ciphers: OPENCODE_CIPHER_LIST,
 	});
 }
 async function relayFetch(
@@ -1384,21 +1590,29 @@ function noteUpstreamResponse(
 	body: string,
 	retryAfter: string | null | undefined,
 	via: string,
+	clientKey = "default",
+	sentSession?: string,
 ): UpstreamErrorKind {
 	const kind = classifyUpstreamError(status, body);
+	if (kind === "overload") {
+		// Transient free-lane load shedding (9router #5583): neither burn the
+		// session nor record a quota cooldown.
+		log("warn", "upstream transient overload (429)", {
+			upstream,
+			model,
+			via,
+		});
+		return kind;
+	}
 	if (kind === "quota") {
 		if (upstream === "opencode") {
 			// Burn and rotate the session ID when upstream rejects it with
-			// 429 FreeUsageLimitError (9router PR #5297 burnSessionId).
-			const fresh = generateSessionId();
-			if (OPENCODE_SESSION_RE.test(fresh)) {
-				openCodeSession = fresh;
-				openCodeSessionMintedAt = Date.now();
-			}
+			// 429 FreeUsageLimitError (9router PR #5297/#5583).
+			burnOpenCodeSession(clientKey, sentSession);
 		}
 		// Quota buckets are per egress. A 429 that survived relayFetch's
 		// rolling arrived from the direct fallback, so only direct answers
-		// cool the model — a healthy relay may hold its own budget.
+		// cool the model — a healthy relay or WARP /64 holds its own budget.
 		if (via === "direct") {
 			const parsed = retryAfterSeconds(retryAfter);
 			// OpenCode attaches a synthetic Retry-After counting down to
@@ -1415,6 +1629,7 @@ function noteUpstreamResponse(
 	} else if (kind === "ip-flagged") {
 		if (via === "direct") upstreamHealth.recordEgressFailure(upstream);
 	} else if (kind === "shape-gate") {
+		if (upstream === "opencode") burnOpenCodeSession(clientKey, sentSession);
 		log("error", "opencode shape gate rejected the fingerprint", {
 			status,
 			hint: "upstream gate changed — fingerprint needs updating",
@@ -1550,6 +1765,7 @@ function validatePath(rawUrl: string): URL | null {
 function sanitizeHeaders(
 	incoming: http.IncomingHttpHeaders,
 	targetHost: string,
+	clientKey = "default",
 ): Record<string, string> {
 	const sanitized: Record<string, string> = {};
 	for (const [key, value] of Object.entries(incoming)) {
@@ -1559,7 +1775,7 @@ function sanitizeHeaders(
 		else if (Array.isArray(value)) sanitized[lower] = value.join(", ");
 	}
 	sanitized.host = targetHost;
-	Object.assign(sanitized, opencodeHeaders());
+	Object.assign(sanitized, opencodeHeaders(clientKey));
 	sanitized["accept-encoding"] = "identity";
 	sanitized.connection = "close";
 	return sanitized;
@@ -1567,8 +1783,9 @@ function sanitizeHeaders(
 
 // ponytail: shared stream pipe — upstream abort/timeout must end response,
 // not become an uncaught exception that crashes pi.
-// When `aliases` is set (caller tools renamed for the v2 gate), SSE lines are
-// scanned for the wire names and restored to the caller's names before flush.
+// When `aliases` is set (caller tools renamed for the v2/v3 gates), SSE lines
+// and JSON payloads are scanned for EVERY wire alias (`*_pi`, `run_command*`,
+// `file_edit*`, `file_read*`) and restored to the caller's original names.
 function pipeUpstreamStream(
 	nodeStream: Readable,
 	res: http.ServerResponse,
@@ -1588,27 +1805,22 @@ function pipeUpstreamStream(
 			);
 		} catch {}
 	});
-	if (aliases && Object.keys(aliases).length) {
+	const restorer = buildAliasRestorer(aliases);
+	if (restorer) {
 		const decoder = new StringDecoder("utf8");
 		let carry = "";
 		nodeStream.on("data", (chunk: Buffer) => {
 			const text = carry + decoder.write(chunk);
 			const lines = text.split("\n");
 			carry = lines.pop() ?? "";
-			const out = lines
-				.map((line) =>
-					line.includes("_pi")
-						? line.replace(/([A-Za-z0-9_-]+)_pi\b/g, (_m, base) => aliases[`${base}_pi`] ?? `${base}_pi`)
-						: line,
-				)
-				.join("\n");
+			const out = lines.map(restorer).join("\n");
 			// Preserve terminators even when the completed line is empty:
 			// blank lines delimit SSE events, including across chunk boundaries.
 			if (lines.length && !res.writableEnded) res.write(out + "\n");
 		});
 		nodeStream.on("end", () => {
 			carry += decoder.end();
-			const tail = carry.replace(/([A-Za-z0-9_-]+)_pi\b/g, (_m, base) => aliases[`${base}_pi`] ?? `${base}_pi`);
+			const tail = restorer(carry);
 			if (tail && !res.writableEnded) res.write(tail);
 			res.end();
 		});
@@ -1621,6 +1833,22 @@ function pipeUpstreamStream(
 	req.on("close", () => {
 		if (!nodeStream.destroyed) nodeStream.destroy();
 	});
+}
+
+function buildAliasRestorer(
+	aliases?: Record<string, string>,
+): ((text: string) => string) | null {
+	if (!aliases) return null;
+	const keys = Object.keys(aliases).filter(Boolean);
+	if (keys.length === 0) return null;
+	// Longest wire names first so `run_command_2` wins before `run_command`.
+	keys.sort((a, b) => b.length - a.length);
+	const escaped = keys.map((k) => k.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"));
+	const re = new RegExp(`\\b(?:${escaped.join("|")})\\b`, "g");
+	return (text: string) => {
+		if (!text) return text;
+		return text.replace(re, (match) => aliases[match] ?? match);
+	};
 }
 
 // ── Start local proxy ──────────────────────────────────────────────
@@ -1722,15 +1950,23 @@ function startProxy(
 			// models keep flowing.
 			const cooldown = upstreamHealth.cooldown(upstream, model);
 			const relayActive = relayState.enabled && relayState.url !== "";
-			if (cooldown && !(cooldown.kind === "ip-flagged" && relayActive)) {
+			const warpActive =
+				upstream === "opencode" &&
+				(Boolean(relayState.warp?.enabled) ||
+					Boolean(process.env.BANSOS_OPENCODE_PROXY?.trim()));
+			if (
+				cooldown &&
+				!warpActive &&
+				!(cooldown.kind === "ip-flagged" && relayActive)
+			) {
 				const wait = Math.max(
 					1,
 					Math.ceil((cooldown.until - Date.now()) / 1000),
 				);
 				const message =
 					cooldown.kind === "quota"
-						? `${model || upstream}: upstream free-quota cooldown (429); retry in ${wait}s`
-						: `${upstream}: this network's IP is flagged by the upstream (403); ${relayActive ? `retry in ${wait}s` : `switch egress via /bansos deploy, or retry in ${wait}s`}`;
+						? `${model || upstream}: upstream free-quota cooldown (429); retry in ${wait}s (or enable /bansos warp on)`
+						: `${upstream}: this network's IP is flagged by the upstream (403); ${relayActive ? `retry in ${wait}s` : `switch egress via /bansos warp on or /bansos deploy, or retry in ${wait}s`}`;
 				res.writeHead(cooldown.kind === "quota" ? 429 : 503, {
 					"content-type": "application/json",
 					"retry-after": String(wait),
@@ -1797,219 +2033,303 @@ function startProxy(
 						res.end(data);
 					}
 				} else {
-					// OpenCode routing — apply free-tier fingerprint before relay/direct.
-					let opencodeBody = bodyChunks.length
+					// OpenCode routing — apply free-tier fingerprint, transient 429
+					// overload retries (#5583), and optional WARP /64 auto-hop (#5727).
+					const clientKey = clientSessionKey(req.headers);
+					const rawFallbackBody = bodyChunks.length
 						? Buffer.concat(bodyChunks)
 						: Buffer.alloc(0);
 					let museResponses = false;
+					let toolAliases: Record<string, string> | undefined;
 					if (parsedBody) {
-						museResponses = transformOpencodeBody(parsedBody).responsesPath;
-						if (relayState.enabled && relayState.url) {
+						museResponses = transformOpencodeBody(
+							parsedBody,
+							clientKey,
+						).responsesPath;
+						if (parsedBody.__bansosToolAliases) {
+							toolAliases = parsedBody.__bansosToolAliases as Record<
+								string,
+								string
+							>;
+							delete parsedBody.__bansosToolAliases;
+						}
+					}
+
+					const serializeOpencodeBody = (forRelay: boolean): Buffer => {
+						if (!parsedBody) return rawFallbackBody;
+						if (!museResponses) {
+							parsedBody.prompt_cache_key = currentOpenCodeSession(clientKey);
+						}
+						if (forRelay) {
 							const mt =
 								parsedBody.max_tokens ??
 								parsedBody.maxTokens ??
 								parsedBody.max_output_tokens;
 							if (typeof mt === "number" && mt > RELAY_MAX_TOKENS) {
-								if ("max_output_tokens" in parsedBody)
-									parsedBody.max_output_tokens = RELAY_MAX_TOKENS;
-								else parsedBody.max_tokens = RELAY_MAX_TOKENS;
+								const copy: Record<string, unknown> = { ...parsedBody };
+								if ("max_output_tokens" in copy)
+									copy.max_output_tokens = RELAY_MAX_TOKENS;
+								else copy.max_tokens = RELAY_MAX_TOKENS;
 								log(
 									"info",
 									`clamped max_tokens ${mt} → ${RELAY_MAX_TOKENS} for relay`,
 								);
+								return Buffer.from(JSON.stringify(copy));
 							}
 						}
-						opencodeBody = Buffer.from(JSON.stringify(parsedBody));
-					}
+						return Buffer.from(JSON.stringify(parsedBody));
+					};
 
-					// Extract the alias map the transform stored on the body —
-					// stripped before send (upstream rejects unknown fields).
-					let toolAliases: Record<string, string> | undefined;
-					if (parsedBody && parsedBody.__bansosToolAliases) {
-						toolAliases = parsedBody.__bansosToolAliases as Record<string, string>;
-						delete parsedBody.__bansosToolAliases;
-						opencodeBody = Buffer.from(JSON.stringify(parsedBody));
-					}
-
-					if (relayState.enabled && relayState.url) {
-						// Free-tier chat lives on /inference/v1 (v2 gate). Inbound
-						// /v1/chat/completions from pi is rewritten to the live
-						// surface; muse-class models take /inference/v1/responses.
-						const inbound = req.url ?? "/";
-						let upstreamPath: string;
-						if (museResponses) {
-							upstreamPath = "/inference/v1/responses";
-						} else if (inbound.startsWith("/v1/")) {
-							upstreamPath = `/inference/v1${inbound.slice(3)}`;
-						} else {
-							upstreamPath = inbound;
-						}
-						const fullUrl = `${UPSTREAM_OPENCODE}${upstreamPath}`;
-						const relayHeaders = sanitizeHeaders(
-							req.headers,
-							new URL(relayState.url).host,
-						);
-						relayHeaders["content-length"] = String(opencodeBody.length);
-						try {
-							const response = await relayFetch(fullUrl, {
-								method: req.method || "POST",
-								headers: relayHeaders,
-								body: opencodeBody.length ? opencodeBody : undefined,
-								signal: AbortSignal.timeout(300_000),
-							});
-							if (response.status === 429 || response.status === 403) {
-								const text = await response.text().catch(() => "");
-								noteUpstreamResponse(
-									upstream,
-									model,
-									response.status,
-									text,
-									response.headers.get("retry-after"),
-									responseVia.get(response) ?? "direct",
-								);
-								const errHeaders: Record<string, string> = {
-									"content-type":
-										response.headers.get("content-type") || "application/json",
-									"cache-control": "no-cache",
-									"x-accel-buffering": "no",
-								};
-								const ra = response.headers.get("retry-after");
-								if (ra) errHeaders["retry-after"] = ra;
-								res.writeHead(response.status, errHeaders);
-								res.end(text);
-								return; // relay handled the response
-							}
-							if (response.ok) {
-								upstreamHealth.recordSuccess(upstream, model);
-							}
-							const ct =
-								response.headers.get("content-type") || "application/json";
-							if (response.body) {
-								res.writeHead(response.status, {
-									"content-type": ct,
-									"cache-control": "no-cache",
-									"x-accel-buffering": "no",
-								});
-								pipeUpstreamStream(
-									Readable.fromWeb(
-										response.body as unknown as import("stream/web").ReadableStream,
-									),
-									res,
-									req,
-									toolAliases,
-								);
-							} else {
-								let data = await response.text();
-								if (toolAliases)
-									data = data.replace(/([A-Za-z0-9_-]+)_pi\b/g, (m, base) => toolAliases?.[`${base}_pi`] ?? m);
-								res.writeHead(response.status, { "content-type": ct });
-								res.end(data);
-							}
-							return; // relay handled the response
-						} catch (e) {
-							log("warn", "opencode relay failed, falling back to direct", {
-								error: String(e),
-							});
-							if (res.headersSent) return; // can't recover mid-stream
-						}
-					}
-					// direct path
-					const fwd = sanitizeHeaders(req.headers, target.hostname);
-					fwd["content-length"] = String(opencodeBody.length);
-					// Same rewrite as the relay path (muse → responses surface).
-					const directPath = museResponses
+					const inbound = req.url ?? "/";
+					const upstreamPath = museResponses
 						? "/inference/v1/responses"
-						: (req.url ?? "").startsWith("/v1/")
-							? `/inference/v1${(req.url ?? "").slice(3)}`
-							: (req.url ?? "/");
-					const proxy = https.request(
-						{
-							method: req.method,
-							hostname: target.hostname,
-							port: 443,
-							path: directPath,
-							headers: fwd,
-							agent: false,
-							ciphers: OPENCODE_CIPHER_LIST,
-						},
-					(upstreamRes) => {
-						const status = upstreamRes.statusCode ?? 502;
-						// Triage 429/403 before piping: quota/IP-flag bodies are
-						// small JSON, and buffering them records reactive cooldowns
-						// and forwards Retry-After instead of streaming a refusal
-						// the session would read as a model outage.
-						if (status === 429 || status === 403) {
-							const chunks: Buffer[] = [];
-							upstreamRes.on("data", (c: Buffer) => chunks.push(c));
-							upstreamRes.on("end", () => {
-								const text = Buffer.concat(chunks).toString("utf8");
-								noteUpstreamResponse(
-									"opencode",
-									model,
-									status,
-									text,
-									typeof upstreamRes.headers["retry-after"] === "string"
-										? (upstreamRes.headers["retry-after"] as string)
-										: null,
-									"direct",
+						: inbound.startsWith("/v1/")
+							? `/inference/v1${inbound.slice(3)}`
+							: inbound;
+					const fullUrl = `${UPSTREAM_OPENCODE}${upstreamPath}`;
+
+					const reqAbort = new AbortController();
+					const onClientDisconnect = () => {
+						if (!res.writableEnded) reqAbort.abort(new Error("client disconnected"));
+					};
+					req.once("aborted", onClientDisconnect);
+					res.once("close", onClientDisconnect);
+
+					const abortableSleep = (ms: number): Promise<void> =>
+						new Promise((resolveSleep) => {
+							if (reqAbort.signal.aborted) {
+								resolveSleep();
+								return;
+							}
+							const onAbort = () => {
+								clearTimeout(timer);
+								resolveSleep();
+							};
+							const timer = setTimeout(() => {
+								reqAbort.signal.removeEventListener("abort", onAbort);
+								resolveSleep();
+							}, ms);
+							reqAbort.signal.addEventListener("abort", onAbort, { once: true });
+						});
+
+					const OPENCODE_OVERLOAD_MAX_RETRIES = 7; // 8 total attempts (~20s)
+					const OPENCODE_OVERLOAD_BASE_MS = 800;
+					const OPENCODE_OVERLOAD_MAX_MS = 4_000;
+					let overloadRetries = 0;
+					let warpHopsUsed = 0;
+					const envProxy = process.env.BANSOS_OPENCODE_PROXY?.trim() || "";
+					const warpCfg = relayState.warp;
+					const maxHops = warpCfg?.maxHops ?? DEFAULT_MAX_HOPS;
+
+					while (!reqAbort.signal.aborted) {
+						const signal = AbortSignal.any([
+							reqAbort.signal,
+							AbortSignal.timeout(300_000),
+						]);
+						const sentSession = currentOpenCodeSession(clientKey);
+						let response: Response | null = null;
+						let via = "direct";
+
+						// 1) WARP / explicit HTTP CONNECT proxy lane (JA4 ciphers preserved).
+						const wantWarp = Boolean(warpCfg?.enabled || envProxy);
+						if (wantWarp) {
+							const customProxy = envProxy || warpCfg?.proxyUrl || "";
+							const ready = customProxy
+								? true
+								: await warpEngine.ensureStarted();
+							if (ready) {
+								const activeProxy = customProxy || warpEngine.proxyUrl;
+								const bodyBuf = serializeOpencodeBody(false);
+								const fwd = sanitizeHeaders(
+									req.headers,
+									target.hostname,
+									clientKey,
 								);
-								if (res.headersSent) return;
-								const outHeaders: Record<string, string> = {
-									"content-type":
-										(upstreamRes.headers["content-type"] as string) ||
-										"application/json",
-									"x-content-type-options": "nosniff",
-								};
-								if (typeof upstreamRes.headers["retry-after"] === "string") {
-									outHeaders["retry-after"] =
-										upstreamRes.headers["retry-after"] as string;
+								fwd["content-length"] = String(bodyBuf.length);
+								try {
+									warpHits++;
+									response = await opencodeDirectFetch(
+										fullUrl,
+										{
+											method: req.method || "POST",
+											headers: fwd,
+											body: bodyBuf.length ? bodyBuf : undefined,
+											signal,
+										},
+										activeProxy,
+									);
+									via = "warp";
+								} catch (e) {
+									if (reqAbort.signal.aborted) return;
+									log("warn", "opencode WARP proxy failed, falling back", {
+										proxy: activeProxy,
+										error: String(e),
+									});
 								}
-								res.writeHead(status, outHeaders);
-								res.end(text);
+							} else {
+								log(
+									"warn",
+									"WARP enabled but tunnel unavailable, falling back",
+									{ error: warpEngine.getStatus().lastError },
+								);
+							}
+						}
+
+						// 2) Cloud relay lane (Cloudflare Workers / Vercel).
+						if (!response && relayState.enabled && relayState.url) {
+							const bodyBuf = serializeOpencodeBody(true);
+							const relayHeaders = sanitizeHeaders(
+								req.headers,
+								new URL(relayState.url).host,
+								clientKey,
+							);
+							relayHeaders["content-length"] = String(bodyBuf.length);
+							try {
+								response = await relayFetch(fullUrl, {
+									method: req.method || "POST",
+									headers: relayHeaders,
+									body: bodyBuf.length ? bodyBuf : undefined,
+									signal,
+								});
+								via = responseVia.get(response) ?? "direct";
+							} catch (e) {
+								if (reqAbort.signal.aborted) return;
+								log("warn", "opencode relay failed, falling back to direct", {
+									error: String(e),
+								});
+							}
+						}
+
+						// 3) Direct HTTPS lane (BoringSSL JA4 cipher list + fresh socket).
+						if (!response) {
+							const bodyBuf = serializeOpencodeBody(false);
+							const fwd = sanitizeHeaders(
+								req.headers,
+								target.hostname,
+								clientKey,
+							);
+							fwd["content-length"] = String(bodyBuf.length);
+							response = await opencodeDirectFetch(fullUrl, {
+								method: req.method || "POST",
+								headers: fwd,
+								body: bodyBuf.length ? bodyBuf : undefined,
+								signal,
 							});
+							via = "direct";
+						}
+
+						if (response.status === 429 || response.status === 403) {
+							const text = await response.text().catch(() => "");
+							const kind = classifyUpstreamError(response.status, text);
+
+							// 9router #5583: retry transient free-lane overload 429s in place.
+							if (
+								kind === "overload" &&
+								overloadRetries < OPENCODE_OVERLOAD_MAX_RETRIES &&
+								!reqAbort.signal.aborted
+							) {
+								overloadRetries++;
+								const delayMs = Math.min(
+									OPENCODE_OVERLOAD_BASE_MS * overloadRetries,
+									OPENCODE_OVERLOAD_MAX_MS,
+								);
+								log("info", "retrying transient opencode overload (429)", {
+									model,
+									via,
+									attempt: overloadRetries + 1,
+									delayMs,
+								});
+								await abortableSleep(delayMs);
+								if (reqAbort.signal.aborted) return;
+								continue;
+							}
+
+							// openhop / 9router #5727: auto-hop to a fresh WARP /64 on quota/IP wall.
+							const canManagedHop =
+								Boolean(warpCfg?.enabled) &&
+								warpCfg?.autoHop !== false &&
+								!envProxy &&
+								!warpCfg?.proxyUrl &&
+								warpEngine.hasBinaries();
+							if (
+								(kind === "quota" || kind === "ip-flagged") &&
+								canManagedHop &&
+								warpHopsUsed < maxHops &&
+								!reqAbort.signal.aborted
+							) {
+								warpHopsUsed++;
+								log("info", "opencode limit hit — rotating WARP /64", {
+									model,
+									status: response.status,
+									kind,
+									hop: warpHopsUsed,
+									maxHops,
+								});
+								const hopRes = await warpEngine.hop();
+								if (hopRes.ok && !hopRes.samePrefix && !reqAbort.signal.aborted) {
+									burnOpenCodeSession(clientKey, sentSession);
+									continue;
+								}
+							}
+
+							noteUpstreamResponse(
+								"opencode",
+								model,
+								response.status,
+								text,
+								response.headers.get("retry-after"),
+								via,
+								clientKey,
+								sentSession,
+							);
+							if (res.headersSent) return;
+							const errHeaders: Record<string, string> = {
+								"content-type":
+									response.headers.get("content-type") || "application/json",
+								"cache-control": "no-cache",
+								"x-accel-buffering": "no",
+								"x-content-type-options": "nosniff",
+							};
+							const ra = response.headers.get("retry-after");
+							if (ra) errHeaders["retry-after"] = ra;
+							res.writeHead(response.status, errHeaders);
+							res.end(text);
 							return;
 						}
-						if (status >= 200 && status < 300) {
+
+						if (response.ok) {
 							upstreamHealth.recordSuccess("opencode", model);
 						}
-						const outHeaders: Record<string, string> = {};
-						for (const h of [
-							"content-type",
-							"cache-control",
-							"x-request-id",
-						]) {
-							const val = upstreamRes.headers[h];
-							if (typeof val === "string") outHeaders[h] = val;
+						const outHeaders: Record<string, string> = {
+							"content-type":
+								response.headers.get("content-type") || "application/json",
+							"cache-control":
+								response.headers.get("cache-control") || "no-cache",
+							"x-accel-buffering": "no",
+							"x-content-type-options": "nosniff",
+						};
+						const xReqId = response.headers.get("x-request-id");
+						if (xReqId) outHeaders["x-request-id"] = xReqId;
+
+						if (response.body) {
+							res.writeHead(response.status, outHeaders);
+							pipeUpstreamStream(
+								Readable.fromWeb(
+									response.body as unknown as import("stream/web").ReadableStream,
+								),
+								res,
+								req,
+								toolAliases,
+							);
+						} else {
+							let data = await response.text();
+							const restorer = buildAliasRestorer(toolAliases);
+							if (restorer) data = restorer(data);
+							res.writeHead(response.status, outHeaders);
+							res.end(data);
 						}
-						outHeaders["x-content-type-options"] = "nosniff";
-						res.writeHead(status, outHeaders);
-						// Reuse the same alias-restore pipe as the relay path.
-						// The https response is a Node IncomingMessage (a Readable),
-						// so it drops straight into pipeUpstreamStream.
-						pipeUpstreamStream(
-							upstreamRes as unknown as Readable,
-							res,
-							req,
-							toolAliases,
-						);
-					},
-					);
-					proxy.on("error", () => {
-						if (!res.headersSent) {
-							res.writeHead(502, { "content-type": "application/json" });
-							res.end(JSON.stringify({ error: "upstream error" }));
-						} else if (!res.writableEnded) {
-							res.end();
-						}
-					});
-					// Streaming free models can exceed 30s; keep connection alive longer.
-					proxy.setTimeout(300_000, () => {
-						proxy.destroy(new Error("timeout"));
-					});
-					req.on("aborted", () => {
-						if (!proxy.destroyed) proxy.destroy();
-					});
-					proxy.end(opencodeBody);
+						return;
+					}
 				}
 			} catch (err) {
 				log("error", "proxy error", { error: String(err) });
@@ -2134,6 +2454,9 @@ function statusText(transient?: string): string | undefined {
 	if (transient) return transient;
 	if (proxyState.kind === "failed") return "bansos: proxy down";
 	if (aliveCatalog.length === 0) return "bansos: no models";
+	if (relayState.warp?.enabled) {
+		return relayState.enabled ? "warp+relay: ON" : "warp: ON";
+	}
 	return `relay: ${relayState.enabled ? "ON" : "OFF"}`;
 }
 // `undefined` removes the entry, so hidden also clears a previous render.
@@ -2215,15 +2538,21 @@ export default async function (pi: ExtensionAPI) {
 	// Keep the gate UA fresh without blocking startup.
 	void refreshOpenCodeUA().catch(() => undefined);
 
-	// ── /bansos command: toggle relay egress live (on|off|status|url [URL]) ───
+	// ── /bansos command: toggle relay & WARP egress live ──────────────
 	pi.registerCommand("bansos", {
 		description:
-			"Relay egress: on | off | status | url [URL] | deploy | list | use <URL> | remove <URL> | hide | show | refresh-models",
+			"Relay & WARP egress: on | off | status | warp [setup|on|off|hop|status] | url [URL] | deploy | list | use <URL> | remove <URL> | hide | show | refresh-models",
 		getArgumentCompletions: (prefix: string) =>
 			[
 				"on",
 				"off",
 				"status",
+				"warp",
+				"warp setup",
+				"warp on",
+				"warp off",
+				"warp hop",
+				"warp status",
 				"url",
 				"deploy",
 				"list",
@@ -2402,9 +2731,12 @@ export default async function (pi: ExtensionAPI) {
 				)
 					flash();
 			} else if (sub === "status") {
+				const ws = warpEngine.getStatus();
+				const warpLine = `WARP ${relayState.warp?.enabled ? "ON" : "OFF"} | running=${ws.running}${ws.lastIp ? ` (${ws.lastIp})` : ""} | hops=${ws.hops} | hits=${warpHits} | binaries=${ws.installed ? "installed" : "missing (/bansos warp setup)"}`;
 				ctx.ui.notify(
 					[
 						`Relay ${relayState.enabled ? `ON → ${relayState.url}` : "OFF (direct)"} | hits=${relayHits} | saved=${relayState.relays.length}`,
+						warpLine,
 						describeProxy(proxyState),
 						`models found at startup: ${aliveCatalog.length}${aliveCatalog.length === 0 ? " (restart to re-check)" : ""}`,
 						`status bar: ${relayState.statusBar}`,
@@ -2413,6 +2745,123 @@ export default async function (pi: ExtensionAPI) {
 						? "warning"
 						: "info",
 				);
+			} else if (sub === "warp") {
+				const action = (parts[1] || "").toLowerCase();
+				const runWarpAction = async (act: string) => {
+					if (act === "setup") {
+						renderStatus(ctx.ui, "installing WARP…");
+						try {
+							const { wgcfPath, wireproxyPath } = await warpEngine.setupBinaries(
+								(m) => ctx.ui.notify(m, "info"),
+							);
+							renderStatus(ctx.ui);
+							ctx.ui.notify(
+								`✓ WARP binaries installed:\n  wgcf: ${wgcfPath}\n  wireproxy: ${wireproxyPath}\nRun "/bansos warp on" to activate.`,
+								"info",
+							);
+						} catch (e) {
+							renderStatus(ctx.ui);
+							ctx.ui.notify(
+								`WARP setup failed: ${(e as Error).message}`,
+								"error",
+							);
+						}
+					} else if (act === "on") {
+						if (!warpEngine.hasBinaries()) {
+							ctx.ui.notify(
+								'WARP binaries missing — running "/bansos warp setup" first…',
+								"info",
+							);
+							try {
+								await warpEngine.setupBinaries((m) => ctx.ui.notify(m, "info"));
+							} catch (e) {
+								ctx.ui.notify(
+									`WARP setup failed: ${(e as Error).message}`,
+									"error",
+								);
+								return;
+							}
+						}
+						renderStatus(ctx.ui, "starting WARP…");
+						const ok = await warpEngine.ensureStarted();
+						if (!ok) {
+							renderStatus(ctx.ui);
+							ctx.ui.notify(
+								`WARP failed to start: ${warpEngine.getStatus().lastError ?? "unknown error"}`,
+								"error",
+							);
+							return;
+						}
+						if (
+							commit((s) => {
+								s.warp = {
+									...(s.warp ?? {}),
+									enabled: true,
+									autoHop: s.warp?.autoHop !== false,
+								};
+							})
+						) {
+							const ws = warpEngine.getStatus();
+							ctx.ui.notify(
+								`✓ WARP ON → ${ws.proxyUrl} | egress=${ws.lastIp ?? "?"} | auto-hop=/64`,
+								"info",
+							);
+						}
+					} else if (act === "off") {
+						await warpEngine.stop();
+						if (
+							commit((s) => {
+								s.warp = { ...(s.warp ?? { enabled: false }), enabled: false };
+							})
+						) {
+							ctx.ui.notify("WARP OFF", "info");
+						}
+					} else if (act === "hop") {
+						renderStatus(ctx.ui, "hopping WARP /64…");
+						const r = await warpEngine.hop({ force: true });
+						renderStatus(ctx.ui);
+						if (r.ok) {
+							burnOpenCodeSession("default");
+							ctx.ui.notify(
+								`✓ WARP hopped → ${r.ip ?? "?"}${r.samePrefix ? " (same block returned by Cloudflare)" : " (fresh /64 ✓)"}`,
+								r.samePrefix ? "warning" : "info",
+							);
+						} else {
+							ctx.ui.notify(`WARP hop failed: ${r.error ?? "unknown"}`, "error");
+						}
+					} else {
+						const ws = warpEngine.getStatus();
+						ctx.ui.notify(
+							[
+								`WARP: ${relayState.warp?.enabled ? "ON" : "OFF"} (auto-hop: ${relayState.warp?.autoHop !== false ? "ON" : "OFF"})`,
+								`tunnel: ${ws.running ? `UP (pid ${ws.pid})` : "DOWN"} → ${ws.proxyUrl}`,
+								`egress IP: ${ws.lastIp ?? "n/a"} | hops: ${ws.hops}${ws.lastHopAt ? ` (last ${ws.lastHopAt})` : ""}`,
+								`binaries: ${ws.installed ? "installed" : "missing — run /bansos warp setup"}`,
+								...(ws.lastError ? [`last error: ${ws.lastError}`] : []),
+							].join("\n"),
+							"info",
+						);
+					}
+				};
+				if (action) {
+					await runWarpAction(action);
+				} else {
+					const ws = warpEngine.getStatus();
+					const pick = await ctx.ui.select("bansos WARP (/64 hop)", [
+						`WARP: ${relayState.warp?.enabled ? "ON" : "OFF"} | egress=${ws.lastIp ?? "down"} | hops=${ws.hops}`,
+						"Turn WARP ON",
+						"Turn WARP OFF",
+						"Hop to fresh /64 now",
+						"Install / update WARP binaries (wgcf + wireproxy)",
+						"Show WARP status",
+					]);
+					if (pick === "Turn WARP ON") await runWarpAction("on");
+					else if (pick === "Turn WARP OFF") await runWarpAction("off");
+					else if (pick === "Hop to fresh /64 now") await runWarpAction("hop");
+					else if (pick === "Install / update WARP binaries (wgcf + wireproxy)")
+						await runWarpAction("setup");
+					else if (pick === "Show WARP status") await runWarpAction("status");
+				}
 			} else if (sub === "refresh-models") {
 				const before = loadCatalogCache().fetchedAt;
 				const cache = await refreshCatalogCache();
@@ -2495,6 +2944,7 @@ export default async function (pi: ExtensionAPI) {
 						: "Show status bar";
 				const choice = await ctx.ui.select("bansos relay", [
 					`Relay: ${relayState.enabled ? "ON" : "OFF"} → ${relayState.url || "direct"}`,
+					`WARP (/64 hop): ${relayState.warp?.enabled ? "ON" : "OFF"}…`,
 					"Turn ON",
 					"Turn OFF",
 					"Switch relay…",
@@ -2504,7 +2954,13 @@ export default async function (pi: ExtensionAPI) {
 					"List saved relays",
 					statusBarItem,
 				]);
-				if (choice === "Turn ON") {
+				if (choice?.startsWith("WARP (/64 hop):")) {
+					const ws = warpEngine.getStatus();
+					ctx.ui.notify(
+						`Use "/bansos warp" (status: ${relayState.warp?.enabled ? "ON" : "OFF"}, binaries: ${ws.installed ? "ready" : "run /bansos warp setup"})`,
+						"info",
+					);
+				} else if (choice === "Turn ON") {
 					if (commit((s) => setRelay(s, true, s.url || DEFAULT_RELAY_URL)))
 						flash();
 				} else if (choice === "Turn OFF") {
@@ -2573,6 +3029,7 @@ export default async function (pi: ExtensionAPI) {
 	// client's keep-alive sockets.
 	pi.on("session_shutdown", (event) => {
 		if (event.reason !== "reload") return;
+		void warpEngine.stop();
 		const released = proxyState;
 		proxyState = { kind: "idle" };
 		const close = ({ server }: ProxyHandle) => {

@@ -1,17 +1,17 @@
 import assert from "node:assert/strict";
-import { readFileSync } from "node:fs";
 import { EventEmitter } from "node:events";
+import { readFileSync } from "node:fs";
 import { Readable, Writable } from "node:stream";
 import { StringDecoder } from "node:string_decoder";
 import { test } from "node:test";
-import { Transpiler } from "bun";
+import { transpileTs } from "./_transpile.ts";
 
 // Exercise the actual helper without loading the extension's Pi dependencies.
 const source = readFileSync(new URL("../extensions/index.ts", import.meta.url), "utf8");
 const start = source.indexOf("function pipeUpstreamStream(");
 const end = source.indexOf("// ── Start local proxy", start);
 assert.ok(start >= 0 && end > start);
-const compiled = new Transpiler({ loader: "ts", target: "node" }).transformSync(source.slice(start, end));
+const compiled = transpileTs(source.slice(start, end));
 const pipe = new Function("StringDecoder", "log", `${compiled}; return pipeUpstreamStream;`)(
   StringDecoder, () => {},
 );
@@ -45,6 +45,22 @@ for (const [index, fixture] of fixtures.entries()) {
     for (const chunks of partitions) assert.equal(await collect(chunks, { bash_pi: "bash" }), expected);
   });
 }
+
+test("restores non-_pi gated wire aliases (run_command, run_command_2, file_edit, file_read) across chunks", async () => {
+  const wire =
+    'data: {"tool_calls":[{"function":{"name":"run_command_2"}},{"function":{"name":"run_command"}},{"function":{"name":"file_edit"}},{"function":{"name":"file_read"}}]}\n\n';
+  const expected =
+    'data: {"tool_calls":[{"function":{"name":"my_terminal"}},{"function":{"name":"exec_command"}},{"function":{"name":"Edit"}},{"function":{"name":"Read"}}]}\n\n';
+  const aliases = {
+    run_command: "exec_command",
+    run_command_2: "my_terminal",
+    file_edit: "Edit",
+    file_read: "Read",
+  };
+  const bytes = Buffer.from(wire);
+  assert.equal(await collect(Array.from(bytes, b => Buffer.from([b])), aliases), expected);
+});
+
 test("no-alias UTF-8 passthrough", async () => {
   const fixture = Buffer.from('data: {"text":"你好 🐦","name":"bash_pi"}\n\n');
   assert.equal(await collect(Array.from(fixture, b => Buffer.from([b]))), fixture.toString());

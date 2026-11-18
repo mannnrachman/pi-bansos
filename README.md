@@ -4,7 +4,7 @@
 [![npm downloads](https://img.shields.io/npm/d18m/pi-bansos.svg?style=flat-square&logo=npm&logoColor=white&label=downloads)](https://www.npmjs.com/package/pi-bansos)
 [![npm downloads/month](https://img.shields.io/npm/dm/pi-bansos.svg?style=flat-square&logo=npm&logoColor=white&label=downloads)](https://www.npmjs.com/package/pi-bansos)
 
-Free model provider for **[pi](https://pi.dev)** ([browse packages](https://pi.dev/packages)). It adds a `bansos` provider with live free models from **2 upstreams** — OpenCode Zen and KiloCode gateway — through a local OpenAI-compatible proxy.
+Free model provider for **[pi](https://pi.dev)** ([browse packages](https://pi.dev/packages)) and **OMP (Oh My Pi)**. It adds a `bansos` provider with live free models from **2 upstreams** — OpenCode Zen and KiloCode gateway — through a local OpenAI-compatible proxy.
 
 ## Contents
 
@@ -13,6 +13,7 @@ Free model provider for **[pi](https://pi.dev)** ([browse packages](https://pi.d
 - [Install](#install)
 - [Update](#update)
 - [Usage](#usage)
+- [WARP /64 hop (optional)](#warp-64-hop-optional)
 - [Relay (optional)](#relay-optional)
 - [Data files](#data-files)
 - [Notes](#notes)
@@ -22,13 +23,15 @@ Free model provider for **[pi](https://pi.dev)** ([browse packages](https://pi.d
 ## Features
 
 - **Zero cost** — all models free, no API key needed for supported upstreams
-- **21 models from 2 sources** — 8 OpenCode Zen + 13 KiloCode gateway
+- **19 models from 2 sources** — 11 OpenCode Zen + 8 KiloCode gateway
+- **Works in both `pi` and `OMP`** — compatible with both Node.js (`pi`) and Bun (`omp`) runtimes, keeping separate per-host state in `~/.pi/agent/` and `~/.omp/agent/`
 - **Instant startup** — the model catalog is cached locally and registered without waiting on upstream; it refreshes in the background
 - **Auto health-check** — only catalog-listed models registered; dead ones skipped silently
 - **Local-only proxy** — binds to `127.0.0.1`, nothing exposed externally; one proxy per loaded extension, shared by every session that uses it (including OMP's in-process subagents)
-- **Optional relay egress with automatic failover** — route through a **Cloudflare Workers** (one command, free, no card) or Vercel relay to dodge per-IP rate limits; a 429/403/unreachable relay cools down (escalating backoff) and the request rolls to the next healthy relay or goes direct — toggled live via `/bansos`
-- **OpenCode free-tier fingerprint kept current** — auto-tracks the live `opencode-ai` UA version, generates spec-correct session/request IDs (verified against opencode's own `Identifier`), and ships the tool-pair payload the 1.19.0 gate expects
-- **Upstream 429/403 triage with reactive cooldowns** — free-tier refusals are classified live: a quota `429 FreeUsageLimitError` cools just that model (90 s base, escalating, upstream `Retry-After` honored up to one full quota day), an IP-flag `403 "abusive traffic"` fails fast with a switch-egress hint instead of hammering a network no backoff can fix, and a fingerprint-gate `403` is surfaced as-is. The session gets a precise reason + `Retry-After` instead of a raw refusal replay.
+- **Optional WARP `/64` outbound hop engine (no cloud account, no root)** — route OpenCode traffic through a local userspace WireGuard proxy (`wgcf` + `wireproxy` on `127.0.0.1:42901`, pinned to dedicated IPv6 `/64` blocks while keeping BoringSSL JA4 TLS ciphers intact); when an IP hits a `429` quota or `403` IP-flag wall, it automatically rotates to a fresh `/64` and retries the turn — toggled live via `/bansos warp on`
+- **Optional cloud relay egress with automatic failover** — route through a **Cloudflare Workers** (one command, free, no card) or Vercel relay to dodge per-IP rate limits; a 429/403/unreachable relay cools down (escalating backoff) and the request rolls to the next healthy relay or goes direct — toggled live via `/bansos`
+- **OpenCode free-tier fingerprint hardened (all 5 gates)** — auto-tracks the live `opencode-ai` dev-wire UA, matches BoringSSL JA4 ClientHello ciphers (`5b57614c22b0`), isolates `ses_…` sessions per downstream client, injects `<env>` and verbatim `read` + `shell` schemas, and round-trip aliases gated tool names/pairs/schemas (`terminal`, Claude Code `ReportFindings`, Codex `exec_command`, `Edit`/`Read`, and colliding names) across both SSE replies and multi-turn history
+- **Smart 429/403 triage + transient overload retry** — transient `429 "The inference service is overloaded"` responses are retried automatically in-place (up to 8×, `800 → 4000 ms` backoff) without burning your session or triggering a cooldown; real quota `429 FreeUsageLimitError` cools just that model, IP-flag `403 "abusive traffic"` fails fast with an egress switch hint (`/bansos warp on` or `/bansos deploy`), and shape-gate `403` rotates the session and surfaces the error cleanly
 - **Auto port bump** — if port 18080 is taken, automatically tries the next one (up to 18100)
 
 ## Models
@@ -51,8 +54,9 @@ Free model provider for **[pi](https://pi.dev)** ([browse packages](https://pi.d
 | `glm-5.3-flash-free`          | GLM 5.3 Flash Free          | ✅     | chat | 200K tokens | 32K tokens  | ✅        |
 | `nemotron-3.5-super-vl-free`  | Nemotron 3.5 Super VL Free  | ✅     | chat | 1M tokens   | 131K tokens | ✅        |
 
+**Hardening 2026-11-18 (0.9.0)**: added bypasses for all 5 hidden OpenCode free-tier fingerprint gates (`terminal`, Claude Code `ReportFindings` pair, Codex `exec_command` pair, `Edit`/`Read` schema gates, and per-client `x-opencode-session` isolation), fixed full wire-alias restoration (`*_pi`, `run_command*`, `file_edit`, `file_read`) across SSE chunks and multi-turn `tool_calls` history, added automatic 8-attempt retries on transient `429 "overloaded"` bursts, and shipped the optional userspace **WARP `/64` hop engine** (`/bansos warp on`) — live-verified turning a `429 FreeUsageLimitError` on a spent `/64` into an immediate `200 OK` after rotating to a fresh IPv6 `/64`.
 
-**Sweep 2026-11-07**: added `iceman-free` (262K/131K) and `inkling-2-small-free` (1M/131K, vision); dropped `pulse-alpha-free` (gone from catalog, `400 Model is unavailable`). All **11** OpenCode free models chat-verified **HTTP 200** live from Node.js. **TLS ClientHello JA4 gate fix**: OpenCode's edge fingerprints the TLS ClientHello JA4 cipher-list hash (`5b57614c22b0`, BoringSSL/Bun order) and answers Node's default OpenSSL cipher list with a fake `429 FreeUsageLimitError` even on a clean IP. Direct OpenCode requests now pass `ciphers: OPENCODE_CIPHER_LIST` + `agent: false` on Node's built-in `https.request` (zero external dependencies). Also moved `prompt_cache_key` into the JSON body (was erroneously sent as an HTTP header in 0.8.0) and stopped trusting OpenCode's synthetic UTC-midnight `Retry-After` (~22 h) on transient 429s so a single burned session rotates cleanly instead of locking the model out for the day.
+**Sweep 2026-11-07 (0.8.1)**: added `iceman-free` (262K/131K) and `inkling-2-small-free` (1M/131K, vision); dropped `pulse-alpha-free` (gone from catalog, `400 Model is unavailable`). Direct OpenCode requests pass `ciphers: OPENCODE_CIPHER_LIST` + `agent: false` to match OpenCode's BoringSSL JA4 cipher-list hash (`5b57614c22b0`).
 
 **Muse note:** the muse-class models are 410-deprecated for now, but their Responses-API routing (`/v1/responses`) stays in place — if a muse-class id returns to the catalog it re-routes automatically, no code change needed.
 
@@ -71,9 +75,7 @@ Keyless — 200 requests/hour per IP. No `Authorization` header is sent; the fre
 | `nvidia/nemotron-3.5-lightning:free`                 | Nemotron 3.5 Lightning Free      | ❌      | 1M tokens   | 65K tokens  | ✅         |
 | `nvidia/nemotron-3.5-super-vl:free`                  | Nemotron 3.5 Super VL Free       | ✅      | 1M tokens   | 131K tokens | ✅         |
 
-**Sweep 2026-11-06**: the gateway shed most of its free list — dropped `recursive/flint-v1.0:free`, `xingchen-agi/xing4.0-29b-a4b:free`, `nvidia/nemotron-3-super-120b-a12b:free`, `nvidia/nemotron-3.5-content-safety:free` and `poolside/laguna-s-2.1:free` (all gone from the live catalog). All 8 survivors chat-verified 200 today (`nemotron-3-ultra` needed one retry past a transient 503). Kilo's NVIDIA free endpoints may retain prompts or use them for training; do not send confidential data.
-
-
+**Sweep 2026-11-06**: all 8 survivors chat-verified 200. Kilo's NVIDIA free endpoints may retain prompts or use them for training; do not send confidential data.
 
 Rate limiting is separated internally by upstream: OpenCode uses its UTC-day local guard and its own upstream free quota; Kilo uses a rolling-hour local guard matching its documented 200/hour/IP limit.
 
@@ -92,6 +94,9 @@ pi install npm:pi-bansos
 ```bash
 omp install pi-bansos
 # same as: omp plugin install pi-bansos
+
+# or link a local checkout during development:
+omp plugin link /path/to/pi-bansos
 ```
 
 Restart OMP after install. Then `/model` → `bansos` → pick a free model.
@@ -120,31 +125,6 @@ Notes (from pi packages docs):
 - Pinned installs (`pi install npm:pi-bansos@0.4.13`) are **skipped** by `pi update --extensions` / `pi update --all` until you change the pin (install a newer `@x.y.z` or drop the pin).
 - After update, restart pi (quit and start again) so the new extension code loads.
 
-### Free model catalog update (0.6.4)
-
-Adds eight chat-verified models: OpenCode DeepSeek V4.1 Flash, GLM 5.3 Flash,
-Cat Jam, LL Alpha, and Nemotron 3.5 Super VL; KiloCode Nemotron 3.5 Super VL,
-Glyph Cluster, and Cat Jam. The curated list now has 32 models; the picker only
-shows those present in the upstream catalog (plus the existing pinned model).
-Muse keeps its Responses API configuration unchanged.
-
-Update the package, then restart pi or OMP. `/bansos refresh-models` refreshes
-catalog membership only; it cannot add definitions missing from an older package.
-
-### Streaming fix (0.6.3)
-
-If 0.6.1 reports `malformed server-sent event JSON` with default tools enabled,
-update to **0.6.3** (or later) and restart pi. Tool-alias rewriting now preserves
-SSE line endings and empty event separators, and decodes split UTF-8 characters
-incrementally. This does not resolve upstream model outages or rate limits
-([issue #12](https://github.com/mannnrachman/pi-bansos/issues/12)).
-
-`0.6.2` is the same fix in git history, but that version never became installable
-on npm (registry staging lock). Install `pi-bansos@0.6.3`.
-
-Maintainers can run the chunk-boundary regression suite with
-`bun test tests/stream-framing.test.ts` (requires Bun; no extra dependencies).
-
 ### OMP (Oh My Pi)
 
 `omp plugin upgrade` only upgrades **marketplace** plugins (`name@marketplace`). npm plugins like `pi-bansos` are not that format.
@@ -162,6 +142,16 @@ omp install pi-bansos
 
 Restart OMP after. Check version: `omp plugin list` (should show `pi-bansos@…`).
 
+### Running tests (maintainers)
+
+The 33-test suite runs with zero extra packages under either Node.js (`>= 22.6`) or Bun (`omp`):
+
+```bash
+npm test
+# or with Bun / OMP's embedded runtime:
+bun test
+```
+
 ## Usage
 
 ```bash
@@ -169,42 +159,70 @@ pi   # or: omp
 # /model → bansos → choose a free model
 ```
 
-Startup is silent and instant: the model list comes from the local catalog cache (see [Data files](#data-files)), so nothing blocks on the network. The TUI status bar shows `relay: ON`/`OFF`, or `bansos: proxy down` / `bansos: no models` when startup failed; `/bansos status` gives the details (proxy address or bind error, models found at startup). Hide or show the status-bar entry with `/bansos hide` / `/bansos show`.
-Rate-limit answers are precise: during a model's quota cooldown or a network IP-flag the proxy fails fast with `Retry-After` and the reason in the body (see [Notes](#notes)) instead of replaying the refusal to the upstream.
+Startup is silent and instant: the model list comes from the local catalog cache (see [Data files](#data-files)), so nothing blocks on the network. The TUI status bar shows `relay: ON`/`OFF`, `warp: ON`, or `warp+relay: ON` (or `bansos: proxy down` / `bansos: no models` when startup failed); `/bansos status` gives the full details (relay state, WARP tunnel IP & hop count, proxy address, models found at startup). Hide or show the status-bar entry with `/bansos hide` / `/bansos show`.
 
 ### Commands
 
-Run `/bansos` any time:
+Run `/bansos` any time (works identically in **pi** and **OMP**):
 
-| Command                       | What it does                                                                 |
-| ----------------------------- | ---------------------------------------------------------------------------- |
-| `/bansos`                     | Interactive menu (switch/remove relay, hide/show status bar, …)              |
-| `/bansos on`                  | Route through the relay                                                      |
-| `/bansos off`                 | Go direct (default)                                                          |
-| `/bansos status`              | Relay state, request count, saved-relay count, proxy address, models found   |
-| `/bansos url <URL>`           | Use a different relay (added to saved list)                                  |
-| `/bansos use <URL>`           | Switch to a relay and enable it (added to saved list)                        |
-| `/bansos list`                | Show all saved relays (★ = active)                                           |
-| `/bansos remove <URL>`        | Forget a saved relay (the active one can't be removed)                       |
-| `/bansos deploy`              | **Deploy a fresh relay** (Cloudflare Workers or Vercel) and switch to it      |
-| `/bansos hide` / `/bansos show` | Hide or show the `bansos` status-bar entry (default: shown)                |
-| `/bansos refresh-models`      | Force a model-catalog re-fetch (warns when it fails; list may be stale)      |
+| Command                         | What it does                                                                              |
+| ------------------------------- | ----------------------------------------------------------------------------------------- |
+| `/bansos`                       | Interactive menu (toggle relay, open WARP menu, switch/deploy relay, status bar, …)       |
+| `/bansos warp`                  | Interactive WARP `/64` hop menu (turn ON/OFF, hop `/64` now, install binaries, status)    |
+| `/bansos warp setup`            | Download & SHA-256-verify `wgcf` + `wireproxy` into `<agentDir>/bansos-warp/bin/`         |
+| `/bansos warp on`               | Start userspace WARP IPv6 tunnel & enable auto-hop on `429`/`403` (auto-runs setup once)  |
+| `/bansos warp off`              | Stop WARP `wireproxy` child process and disable WARP routing                              |
+| `/bansos warp hop`              | Immediately rotate to a fresh Cloudflare WARP IPv6 `/64` block and mint a fresh session   |
+| `/bansos warp status`           | Show WARP tunnel PID, active egress IPv6, hop count, and binary status                    |
+| `/bansos on`                    | Route through the active cloud relay                                                      |
+| `/bansos off`                   | Disable cloud relay                                                                       |
+| `/bansos status`                | Relay state, WARP state & IP, request counts, proxy address, and models found             |
+| `/bansos url <URL>`             | Set a relay URL (added to saved list)                                                     |
+| `/bansos use <URL>`             | Switch to a relay and enable it (added to saved list)                                     |
+| `/bansos list`                  | Show all saved relays (★ = active)                                                        |
+| `/bansos remove <URL>`          | Forget a saved relay (the active one can't be removed)                                    |
+| `/bansos deploy`                | **Deploy a fresh relay** (Cloudflare Workers or Vercel) and switch to it                  |
+| `/bansos hide` / `/bansos show` | Hide or show the `bansos` status-bar entry (default: shown)                               |
+| `/bansos refresh-models`        | Force a model-catalog re-fetch (warns when it fails; list may be stale)                   |
 
 ### Environment variables
 
 ```bash
-BANSOS_PORT=18081 pi   # custom proxy port (default 18080, bumps up to 18100)
-BANSOS_DEBUG=1 pi      # print startup, relay and rate-limit diagnostics on stderr
-BANSOS_OPENCODE_UA=x.y.z pi  # pin the opencode User-Agent version (default: auto-track npm latest, fallback 1.18.31)
+BANSOS_PORT=18081 pi                         # custom proxy port (default 18080, bumps up to 18100)
+BANSOS_DEBUG=1 pi                            # print startup, relay, WARP, and triage diagnostics on stderr
+BANSOS_OPENCODE_UA=x.y.z pi                  # override OpenCode User-Agent (default: auto-track npm latest)
+BANSOS_OPENCODE_PROXY=http://127.0.0.1:8080 pi # route OpenCode via a custom HTTP CONNECT proxy (JA4 preserved)
+WARP_PROXY_PORT=42901 pi                     # local wireproxy port for /bansos warp (default 42901)
+WARP_WGCF_PATH=/path/to/wgcf pi              # custom wgcf binary path
+WARP_WIREPROXY_PATH=/path/to/wireproxy pi    # custom wireproxy binary path
 ```
+
+## WARP /64 hop (optional)
+
+When your network's real IP exhausts OpenCode's daily free quota (`429 FreeUsageLimitError`) or sits on a flagged CGNAT/VPN range (`403 abusive traffic`), `/bansos warp on` solves it locally **without needing a Cloudflare/Vercel account, API token, or `sudo`/root**:
+
+```text
+/bansos warp on
+  WARP binaries missing — running "/bansos warp setup" first…
+  Downloading wgcf_2.3.1_linux_amd64…
+  Downloading wireproxy_linux_amd64.tar.gz…
+  ✓ WARP ON → http://127.0.0.1:42901 | egress=2a09:bac5:… | auto-hop=/64
+```
+
+How it works (adapted from [openhop](https://openhop.cfd/source/) and 9router [#5727](https://github.com/decolua/9router/pull/5727)):
+
+1. **Isolated to OpenCode only** — `wireproxy` runs in userspace and binds `127.0.0.1:42901`. Your browser, SSH, games, and other apps stay on your normal connection and never drop when WARP rotates.
+2. **Dedicated IPv6 `/64` pinning (even on IPv4-only ISPs)** — WARP's IPv4 egress shares a small `/24` CGNAT pool, whereas IPv6 assigns a fresh `/64` block per registration. `pi-bansos` pins the inner WireGuard interface to IPv6 while carrying the outer UDP tunnel over your normal IPv4/IPv6 link, and tunnels TLS with `OPENCODE_CIPHER_LIST` so OpenCode's JA4 check passes.
+3. **Automatic recovery on 429/403** — if a turn hits a `429` quota wall or `403` IP flag while WARP is on, `pi-bansos` automatically registers a fresh WARP `/64` (verifying `sameBlock` changed, with a 45 s cooldown and `wgcf-account.toml.bak` rollback if registration fails), rotates `x-opencode-session`, and retries your request transparently.
+4. **Priority & graceful fallback** — when both WARP and a cloud relay are enabled, OpenCode prefers WARP first (no Vercel `max_tokens` clamp) and falls back to your relay or direct connection if WireGuard UDP is blocked on the current Wi-Fi.
 
 ## Relay (optional)
 
-By default pi-bansos talks to the free upstreams **directly**. If your IP gets rate-limited or blocked, switch on a relay — requests then go out through a relay worker instead of your own IP. Toggle it live from inside pi, no restart.
+By default pi-bansos talks to the free upstreams **directly**. As an alternative (or fallback) to WARP `/64` hopping — especially on networks whose firewall blocks WireGuard UDP, or for KiloCode gateway traffic — you can route through a cloud relay worker instead of your own IP. Toggle it live from inside pi or OMP, no restart.
 
-The relay on/off switch, the saved relay list, and the status-bar preference live in the state file (see [Data files](#data-files)) and are remembered across restarts — you manage them only via `/bansos`, nothing in your shell. Each `/bansos` change re-reads the file at the moment it saves, applies only that change, writes it atomically, and then switches this process to the saved state — so settings changed meanwhile by another running pi/OMP process are kept, and that process's relay switch also takes effect here. Commands that only show state (`status`, `list`) don't re-read; other running processes pick up changes at their next session start or their next `/bansos` change. If saving fails, the change is not applied and the error is shown. Every relay you `deploy`, `use`, or `url` is **kept in a saved list**, so you can switch between them anytime without re-typing URLs. Any HTTP relay works (Vercel, Cloudflare, Deno, or your own). There is **no built-in default** — run `/bansos deploy` to create one or `/bansos url <URL>` to use your own.
+The relay on/off switch, WARP preference, the saved relay list, and the status-bar preference live in the state file (see [Data files](#data-files)) and are remembered across restarts — you manage them only via `/bansos`, nothing in your shell. Each `/bansos` change re-reads the file at the moment it saves, applies only that change, writes it atomically, and then switches this process to the saved state — so settings changed meanwhile by another running pi/OMP process are kept. Every relay you `deploy`, `use`, or `url` is **kept in a saved list**, so you can switch between them anytime without re-typing URLs.
 
-**Switching between saved relays** (e.g. you deployed one and also have another):
+**Switching between saved relays**:
 
 ```text
 /bansos list
@@ -247,31 +265,31 @@ The generated worker is **hardened**: it embeds a random 32-byte secret minted p
   ✓ Deployed & active: https://relay-2026-xxx.vercel.app
 ```
 
-> Both relays mask your IP behind the platform's edge IPs. Useful when your IP is rate-limited or flagged (OpenCode's newer 403 *"abusive traffic from this IP"* block is IP-level and passes with a different egress). If a relay's own egress gets flagged, pi-bansos cools it down (90 s, escalating) and rolls to the next healthy relay or goes direct. A relay is one fixed exit, not rotation — for more egress diversity deploy several and keep them in the saved list. The token input has no hidden/secret mode in the TUI, so it shows while typing — paste, deploy, done.
-
 ## Data files
 
-pi-bansos writes two files into the **agent directory of the host that loaded it** — pi and OMP each keep their own state:
+pi-bansos writes its state into the **agent directory of the host that loaded it** — pi and OMP each keep their own isolated state:
 
 | Host | Directory          |
 | ---- | ------------------ |
 | pi   | `~/.pi/agent/`     |
 | OMP  | `~/.omp/agent/`    |
 
-| File                        | Purpose                                                                        |
-| --------------------------- | ------------------------------------------------------------------------------ |
-| `pi-bansos-relay-state.json` | Relay on/off, saved relays (incl. per-relay auth secrets), active relay, status-bar preference |
-| `bansos-models.json`        | Cached upstream model catalog for instant startup, refreshed in background     |
+| File / Directory                | Purpose                                                                                      |
+| ------------------------------- | -------------------------------------------------------------------------------------------- |
+| `pi-bansos-relay-state.json`    | Relay on/off, saved relays (incl. auth secrets), WARP toggle, and status-bar preference      |
+| `bansos-models.json`            | Cached upstream model catalog for instant startup, refreshed in background                   |
+| `bansos-opencode-version.json`  | Cached latest `opencode-ai` dev-wire User-Agent stamp                                        |
+| `bansos-warp/`                  | Optional WARP `/64` hop binaries (`bin/wgcf`, `bin/wireproxy`) and WireGuard/wireproxy state |
 
-Both live outside the package directory, so npm updates never wipe them. The host is detected from the extension's real install path, with a process-name fallback for symlinked installs (e.g. an OMP npm plugin symlinked into a repo checkout). If you use pi and OMP side by side, each has its own relay settings and catalog cache — deleting one leaves the other untouched.
+All state lives outside the package directory, so npm updates never wipe it. The host is detected from the extension's real install path, with a process-name fallback for symlinked installs (e.g. `omp plugin link`).
 
 ## Notes
 
 - Free upstream models are best-effort: promos can expire, model IDs can change, and rate limits may apply
 - pi-bansos health-checks against the cached/live catalog at startup so unavailable models are skipped instead of registered
 - KiloCode gateway: 200 req/hr per IP, keyless
-- Upstream refusals are triaged, not replayed: a quota `429 FreeUsageLimitError` cools **just that model** (90 s base, escalating; upstream `Retry-After` honored, capped at one UTC quota day), an IP-flag `403 "abusive traffic from this IP address"` fails fast with a switch-egress hint (`/bansos deploy`) while no relay is active, and a fingerprint-gate `403 FreeTierError` is surfaced as-is. Any 2xx clears the cooldowns
-- OpenCode's free limits are dynamic and metered per account/workspace/network — a shared or CGNAT IP can be flagged because of *other* users, so a 429 with zero personal usage is usually the network bucket, not the model
+- Upstream refusals are triaged, not replayed blindly: transient `429 "overloaded"` responses are retried automatically (~20 s window); quota `429 FreeUsageLimitError` rotates the client's session (and auto-hops `/64` when WARP is on, or cools just that model on direct egress); IP-flag `403 "abusive traffic"` fails fast with a switch-egress hint (`/bansos warp on` or `/bansos deploy`) when neither WARP nor a relay is active; any 2xx clears cooldowns
+- OpenCode's free limits are dynamic and metered per account/workspace/network — a shared or CGNAT IP can be flagged because of *other* users, which is where `/bansos warp on` or `/bansos deploy` helps immediately
 - Catalog specs (context, max output, modalities) come from the curated model lists in the extension; the cache only stores which IDs are alive
 
 ## Uninstall

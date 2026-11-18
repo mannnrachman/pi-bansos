@@ -1,13 +1,13 @@
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { test } from "node:test";
-import { Transpiler } from "bun";
+import { transpileTs } from "./_transpile.ts";
 
 // Load the real definitions and cache filter without starting a proxy or network calls.
 const source = readFileSync(new URL("../extensions/index.ts", import.meta.url), "utf8");
 const definitions = source.slice(source.indexOf("const KNOWN_MODELS:"), source.indexOf("// ── Whitelists"));
 const filter = source.slice(source.indexOf("function modelsFromCache("), source.indexOf("// Each upstream publishes"));
-const compiled = new Transpiler({ loader: "ts", target: "node" }).transformSync(`${definitions}\n${filter}`);
+const compiled = transpileTs(`${definitions}\n${filter}`);
 const { KNOWN_MODELS, KILO_MODELS, KILO_MODEL_IDS, modelsFromCache } = new Function(
   `${compiled}; return { KNOWN_MODELS, KILO_MODELS, KILO_MODEL_IDS, modelsFromCache };`,
 )();
