@@ -1,5 +1,28 @@
 # Changelog
 
+## [0.9.2] - 2026-11-20
+
+### Added
+- **KiloCode free fallback when a WARP `/64` is already spent** — WARP assigns blocks from a shared pool, so a freshly registered `/64` can still return `429 FreeUsageLimitError` (live-verified: one hop landed on a clean block and returned `200`, while earlier hops landed on spent blocks). After the first hop still fails, the proxy now replays the turn on Kilo's keyless free gateway (`kilo-auto/free` by default) instead of waiting out the upstream countdown.
+  - The original request body is used (caller tool names, `tools`, `stream`, and message history are preserved); OpenCode-only fields (`prompt_cache_key`, alias bookkeeping) are stripped.
+  - The reply keeps the requested model name in both JSON and SSE (`rewriteModelInJson` / `rewriteModelInSseLine`) and carries `x-bansos-fallback: kilo:<model>`.
+  - A successful fallback parks OpenCode for 5 minutes: the next turns skip the known-bad `429` + hop and go straight to Kilo, then probe OpenCode again after the TTL.
+  - New opt-outs: `BANSOS_KILO_FALLBACK=0` disables the fallback; `BANSOS_KILO_FALLBACK_MODEL` selects another Kilo free router.
+  - New pure helpers in `extensions/kilo-fallback.ts` with 4 unit tests; suite: **39/39**.
+- **Live end-to-end proof** — real OpenCode `429` → real WARP hop → `200` from OpenCode on a clean `/64` (9.4 s), and a simulated spent-block `429` → Kilo fallback `200` (model rewritten, streaming and non-streaming, second request skips OpenCode via the circuit).
+
+## [0.9.1] - 2026-11-20
+
+### Fixed
+- **`429 FreeUsageLimitError` no longer fails the turn with `retry-after-ms=63008000`** — OpenCode hard-fails when a provider's `Retry-After` exceeds its `retry.maxDelayMs` (300 000 ms), and OpenCode free-tier 429s carry countdowns to UTC midnight (~17–23 h). The proxy now clamps **every** `Retry-After` it sends downstream (OpenCode lane, Kilo lane, and local cooldown responses) to `MAX_CLIENT_RETRY_AFTER_SEC = 240 s` via `clampRetryAfterSeconds` / `clientRetryAfterHeader`, while the unclamped upstream hint still drives the internal quota cooldown. This turns `Retry failed after 1 attempts: Provider requested 63008000ms wait…` into a normal retryable 429.
+- **Reactive WARP `/64` recovery without `/bansos warp on`** — a quota `429` or IP-flag `403` now auto-hops even when WARP was never enabled manually. The hop uses `warpEngine.hop({ force: true })` so the 45 s manual cooldown cannot block recovery, starts the tunnel from cold, and installs the `wgcf`/`wireproxy` binaries on demand (SHA-256-verified, same as `/bansos warp setup`). After the first successful hop, reactive WARP stays active for the rest of the process without rewriting the state file.
+- **One session-rotation retry after a quota 429** — when the hop is unavailable or returns the same `/64`, the proxy still burns the rejected `x-opencode-session` and replays the turn once before surfacing the error.
+
+### Changed
+- `/bansos warp off` is now a full opt-out: it also writes `autoHop: false` (clearing the in-memory reactive flag) so automatic recovery stops until `/bansos warp on`. `/bansos warp on` restores `autoHop: true`.
+- `BANSOS_WARP_AUTO=0` disables reactive auto-hop; `BANSOS_WARP_AUTO_SETUP=0` disables automatic binary installation. Status bar/menu now show `warp(auto): ON` while reactive WARP is active.
+- Tests: new coverage for the downstream `Retry-After` clamp (including the live `63008` / `84111` values) and for cold-start + `force` hop behaviour. Suite: 35/35.
+
 ## [0.9.0] - 2026-11-18
 
 ### Added
