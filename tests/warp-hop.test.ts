@@ -181,6 +181,82 @@ test("WarpHopEngine: start, fresh /64 hop, cooldown guard, and account backup re
 	}
 });
 
+test("WarpHopEngine: cold hop starts the tunnel and force bypasses the manual cooldown", async () => {
+	const dir = fs.mkdtempSync(path.join(tmpdir(), "bansos-warp-cold-"));
+	try {
+		const binDir = path.join(dir, "bin");
+		fs.mkdirSync(binDir, { recursive: true });
+		const ext = process.platform === "win32" ? ".exe" : "";
+		fs.writeFileSync(path.join(binDir, `wgcf${ext}`), "stub", { mode: 0o755 });
+		fs.writeFileSync(path.join(binDir, `wireproxy${ext}`), "stub", { mode: 0o755 });
+
+		let clock = 1_000_000;
+		let regCounter = 0;
+		const ips = ["2606:4700:110:10::1", "2606:4700:110:20::1"];
+		let ipIdx = 0;
+		const engine = new WarpHopEngine({
+			dataDir: dir,
+			proxyPort: 43998,
+			now: () => clock,
+			readyPollMs: 5,
+			readyTimeoutMs: 500,
+			killStaleFn: async () => {},
+			runCmd: async (_bin, args, cwd) => {
+				if (args[0] === "register") {
+					regCounter++;
+					fs.writeFileSync(
+						path.join(cwd, "wgcf-account.toml"),
+						`device_id = "cold-${regCounter}"\n`,
+					);
+					return { code: 0, stdout: "ok", stderr: "" };
+				}
+				if (args[0] === "generate") {
+					fs.writeFileSync(
+						path.join(cwd, "wgcf-profile.conf"),
+						"[Interface]\nPrivateKey = dummy\n",
+					);
+					return { code: 0, stdout: "ok", stderr: "" };
+				}
+				return { code: 1, stdout: "", stderr: "unexpected" };
+			},
+			spawnDaemon: () => {
+				const fake = new EventEmitter() as any;
+				fake.pid = 22222;
+				fake.kill = () => fake.emit("exit", 0);
+				return fake;
+			},
+			traceFn: async () => ({
+				ip: ips[Math.min(ipIdx++, ips.length - 1)]!,
+				warp: "on",
+			}),
+		});
+
+		// No ensureStarted(): the reactive 429 path calls hop() directly.
+		const first = await engine.hop({ force: true });
+		assert.equal(first.ok, true);
+		assert.equal(first.samePrefix, false);
+		assert.equal(engine.getStatus().running, true);
+		assert.equal(engine.getStatus().lastIp, ips[0]);
+
+		// The manual 45 s cooldown still applies to a normal hop...
+		clock += 1_000;
+		const cooled = await engine.hop();
+		assert.equal(cooled.ok, false);
+		assert.match(cooled.error ?? "", /cooldown/);
+
+		// ...but the automatic recovery path forces a fresh /64 immediately.
+		const forced = await engine.hop({ force: true });
+		assert.equal(forced.ok, true);
+		assert.equal(forced.samePrefix, false);
+		assert.equal(forced.ip, ips[1]);
+		assert.equal(regCounter, 2);
+
+		await engine.stop();
+	} finally {
+		fs.rmSync(dir, { recursive: true, force: true });
+	}
+});
+
 test("HTTP CONNECT tunnel rejects cleanly on non-200 proxy status", async () => {
 	const { openProxyTlsTunnel } = await import("../extensions/warp-hop.ts");
 	const server = http.createServer();

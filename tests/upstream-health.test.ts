@@ -1,8 +1,11 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import {
+	MAX_CLIENT_RETRY_AFTER_SEC,
 	UpstreamHealth,
+	clampRetryAfterSeconds,
 	classifyUpstreamError,
+	clientRetryAfterHeader,
 	retryAfterSeconds,
 } from "../extensions/upstream-health.ts";
 
@@ -62,6 +65,24 @@ test("parses Retry-After in seconds and HTTP-date form, clamped", () => {
 		retryAfterSeconds(new Date(now - 60_000).toUTCString(), now),
 		0,
 	);
+});
+
+test("client Retry-After is clamped below OpenCode's retry.maxDelayMs", () => {
+	// The live 429 that produced "Provider requested 63008000ms wait" carried
+	// `Retry-After: 63008` (17.5 h). OpenCode hard-fails above 300 s.
+	assert.equal(clientRetryAfterHeader("63008"), String(MAX_CLIENT_RETRY_AFTER_SEC));
+	assert.equal(clientRetryAfterHeader("84111"), String(MAX_CLIENT_RETRY_AFTER_SEC));
+	assert.equal(clientRetryAfterHeader("120"), "120");
+	assert.equal(clientRetryAfterHeader("0"), "1");
+	assert.equal(clientRetryAfterHeader(null), null);
+	assert.equal(clientRetryAfterHeader("garbage"), null);
+	assert.equal(clampRetryAfterSeconds(63008), MAX_CLIENT_RETRY_AFTER_SEC);
+	assert.equal(clampRetryAfterSeconds(900), MAX_CLIENT_RETRY_AFTER_SEC);
+	assert.equal(clampRetryAfterSeconds(90), 90);
+	assert.equal(clampRetryAfterSeconds(0), 1);
+	assert.equal(clampRetryAfterSeconds(Number.NaN), MAX_CLIENT_RETRY_AFTER_SEC);
+	// The cap must stay below 300 s so OpenCode actually retries.
+	assert.ok(MAX_CLIENT_RETRY_AFTER_SEC < 300);
 });
 
 test("quota cooldown is per upstream+model only", () => {

@@ -13,7 +13,9 @@ import { Readable } from "node:stream";
 import { StringDecoder } from "node:string_decoder";
 import { fileURLToPath } from "node:url";
 import {
+	clampRetryAfterSeconds,
 	classifyUpstreamError,
+	clientRetryAfterHeader,
 	retryAfterSeconds,
 	UpstreamHealth,
 	type UpstreamErrorKind,
@@ -23,6 +25,12 @@ import {
 	tlsCustomFetch,
 	WarpHopEngine,
 } from "./warp-hop.ts";
+import {
+	buildKiloFallbackBody,
+	DEFAULT_KILO_FALLBACK_MODEL,
+	rewriteModelInJson,
+	rewriteModelInSseLine,
+} from "./kilo-fallback.ts";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 
 // ── Configuration ──────────────────────────────────────────────────
@@ -862,6 +870,57 @@ process.once("exit", () => {
 	void warpEngine.stop();
 });
 
+// ── Automatic WARP recovery ───────────────────────────────────────
+// A quota 429 / IP-flag 403 on the OpenCode lane is recoverable without the
+// user running `/bansos warp on` first: rotate to a fresh userspace WARP /64,
+// burn the rejected session, and replay the turn through the tunnel. The
+// first successful recovery keeps WARP active for the rest of this process
+// (reactive mode) without persisting a state-file change.
+//
+// `BANSOS_WARP_AUTO=0` disables the reactive recovery; `/bansos warp off`
+// also writes `autoHop: false`, so an explicit opt-out wins.
+const WARP_AUTO_RECOVERY = process.env.BANSOS_WARP_AUTO !== "0";
+// Missing binaries are downloaded on the first recoverable 429 unless
+// `BANSOS_WARP_AUTO_SETUP=0` (same SHA-256-verified install as `warp setup`).
+const WARP_AUTO_SETUP = process.env.BANSOS_WARP_AUTO_SETUP !== "0";
+let warpAutoActivated = false;
+let warpAutoSetupPromise: Promise<boolean> | null = null;
+
+/** True when a 429/403 on the OpenCode lane can be recovered by a WARP hop. */
+function warpRecoveryAvailable(): boolean {
+	return (
+		WARP_AUTO_RECOVERY &&
+		relayState.warp?.autoHop !== false &&
+		!process.env.BANSOS_OPENCODE_PROXY?.trim() &&
+		!relayState.warp?.proxyUrl &&
+		(warpEngine.hasBinaries() || WARP_AUTO_SETUP)
+	);
+}
+
+async function ensureWarpBinariesForAutoHop(): Promise<boolean> {
+	if (warpEngine.hasBinaries()) return true;
+	if (!WARP_AUTO_SETUP) return false;
+	if (!warpAutoSetupPromise) {
+		warpAutoSetupPromise = (async () => {
+			try {
+				log("info", "WARP binaries missing — installing for automatic recovery");
+				await warpEngine.setupBinaries((msg) => log("info", msg));
+				const ok = warpEngine.hasBinaries();
+				log("info", "automatic WARP binary install finished", { ok });
+				return ok;
+			} catch (e) {
+				log("warn", "automatic WARP binary install failed", {
+					error: String(e),
+				});
+				return false;
+			} finally {
+				warpAutoSetupPromise = null;
+			}
+		})();
+	}
+	return warpAutoSetupPromise;
+}
+
 // ── Relay pool health & failover ───────
 // A relay that 429s is out of quota for now. Vercel relays share one NAT
 // egress pool, so extra relays do NOT add IP diversity — the value here is
@@ -1505,6 +1564,20 @@ const STRIP_HEADERS = new Set([
 	"proxy-authorization",
 ]);
 
+// ── KiloCode free fallback ─────────────────────────────────────────
+// OpenCode's daily free bucket is metered per /64, and many WARP /64 blocks
+// are already spent by other users, so a hop can land on another 429. Kilo's
+// keyless free gateway has its own quota: once the WARP hop fails, replay the
+// turn there instead of surfacing a ~10 h Retry-After. Disable with
+// BANSOS_KILO_FALLBACK=0; pick another router with
+// BANSOS_KILO_FALLBACK_MODEL=<id>.
+const KILO_FALLBACK_ENABLED = process.env.BANSOS_KILO_FALLBACK !== "0";
+const KILO_FALLBACK_MODEL =
+	process.env.BANSOS_KILO_FALLBACK_MODEL?.trim() ||
+	DEFAULT_KILO_FALLBACK_MODEL;
+const OPENCODE_FALLBACK_TTL_MS = 5 * 60_000;
+const opencodeFallbackUntil = new Map<string, number>();
+
 // ── Logger ─────────────────────────────────────────────────────────
 type LogLevel = "info" | "warn" | "error" | "audit";
 function log(level: LogLevel, message: string, meta?: Record<string, unknown>) {
@@ -1791,6 +1864,7 @@ function pipeUpstreamStream(
 	res: http.ServerResponse,
 	req: http.IncomingMessage,
 	aliases?: Record<string, string>,
+	rewriteLine?: (line: string) => string,
 ): void {
 	nodeStream.on("error", (e: unknown) => {
 		log("error", "upstream stream error", { error: String(e) });
@@ -1806,21 +1880,25 @@ function pipeUpstreamStream(
 		} catch {}
 	});
 	const restorer = buildAliasRestorer(aliases);
-	if (restorer) {
+	const transform =
+		restorer && rewriteLine
+			? (line: string) => rewriteLine(restorer(line))
+			: (restorer ?? rewriteLine);
+	if (transform) {
 		const decoder = new StringDecoder("utf8");
 		let carry = "";
 		nodeStream.on("data", (chunk: Buffer) => {
 			const text = carry + decoder.write(chunk);
 			const lines = text.split("\n");
 			carry = lines.pop() ?? "";
-			const out = lines.map(restorer).join("\n");
+			const out = lines.map(transform).join("\n");
 			// Preserve terminators even when the completed line is empty:
 			// blank lines delimit SSE events, including across chunk boundaries.
 			if (lines.length && !res.writableEnded) res.write(out + "\n");
 		});
 		nodeStream.on("end", () => {
 			carry += decoder.end();
-			const tail = restorer(carry);
+			const tail = transform(carry);
 			if (tail && !res.writableEnded) res.write(tail);
 			res.end();
 		});
@@ -1849,6 +1927,87 @@ function buildAliasRestorer(
 		if (!text) return text;
 		return text.replace(re, (match) => aliases[match] ?? match);
 	};
+}
+
+type KiloFallbackResult = { ok: boolean; error?: string };
+
+/**
+ * Replay an OpenCode turn on Kilo's keyless free gateway. Used when
+ * OpenCode's daily free bucket is exhausted across every egress (WARP hop
+ * included). Writes the response itself and reports whether the client was
+ * served. The original request bytes are used, so caller tool names are not
+ * the OpenCode aliases and need no restoring.
+ */
+async function serveKiloFallback(
+	req: http.IncomingMessage,
+	res: http.ServerResponse,
+	rawBody: Buffer,
+	requestedModel: string,
+	clientIP: string,
+	signal: AbortSignal,
+): Promise<KiloFallbackResult> {
+	if (!KILO_FALLBACK_ENABLED) return { ok: false, error: "disabled" };
+	if (res.headersSent) return { ok: false, error: "response already started" };
+	const body = buildKiloFallbackBody(rawBody, KILO_FALLBACK_MODEL);
+	if (!body) {
+		return { ok: false, error: "request body is not a JSON object" };
+	}
+	const limit = checkRateLimit(clientIP, "kilo");
+	if (!limit.ok) {
+		return {
+			ok: false,
+			error: `kilo rate limit (${limit.retryAfterSec}s)`,
+		};
+	}
+	const isStream = body.stream === true;
+	let response: Response;
+	try {
+		response = await relayFetch(KILO_CHAT_URL, {
+			method: "POST",
+			headers: { "Content-Type": "application/json" },
+			body: JSON.stringify(body),
+			signal,
+		});
+	} catch (e) {
+		return { ok: false, error: String(e).slice(0, 200) };
+	}
+	if (!response.ok) {
+		const text = await response.text().catch(() => "");
+		log("warn", "kilo fallback refused the turn", {
+			status: response.status,
+			model: KILO_FALLBACK_MODEL,
+			body: text.slice(0, 160),
+		});
+		return { ok: false, error: `kilo HTTP ${response.status}` };
+	}
+	upstreamHealth.recordSuccess("kilo", KILO_FALLBACK_MODEL);
+	const headers: Record<string, string> = {
+		"content-type":
+			response.headers.get("content-type") ||
+			(isStream ? "text/event-stream" : "application/json"),
+		"cache-control": "no-cache",
+		"x-accel-buffering": "no",
+		"x-content-type-options": "nosniff",
+		"x-bansos-fallback": `kilo:${KILO_FALLBACK_MODEL}`,
+	};
+	if (isStream && response.body) {
+		res.writeHead(response.status, headers);
+		pipeUpstreamStream(
+			Readable.fromWeb(
+				response.body as unknown as import("stream/web").ReadableStream,
+			),
+			res,
+			req,
+			undefined,
+			(line) => rewriteModelInSseLine(line, requestedModel),
+		);
+		return { ok: true };
+	}
+	const text = await response.text();
+	const out = rewriteModelInJson(text, requestedModel);
+	res.writeHead(response.status, headers);
+	res.end(out);
+	return { ok: true };
 }
 
 // ── Start local proxy ──────────────────────────────────────────────
@@ -1929,15 +2088,18 @@ function startProxy(
 				typeof parsedBody?.model === "string" ? parsedBody.model : "";
 			const limit = checkRateLimit(clientIP, upstream);
 			if (!limit.ok) {
+				// OpenCode aborts its retry loop when a provider asks for more
+				// than retry.maxDelayMs (300 s), so never leak a daily hint.
+				const clientWait = clampRetryAfterSeconds(limit.retryAfterSec);
 				log("warn", "rate limit exceeded", { ip: clientIP, upstream });
 				res.writeHead(429, {
 					"content-type": "application/json",
-					"retry-after": String(limit.retryAfterSec),
+					"retry-after": String(clientWait),
 				});
 				res.end(
 					JSON.stringify({
 						error: `${upstream} rate limit exceeded`,
-						retry_after_secs: limit.retryAfterSec,
+						retry_after_secs: clientWait,
 					}),
 				);
 				return;
@@ -1950,23 +2112,32 @@ function startProxy(
 			// models keep flowing.
 			const cooldown = upstreamHealth.cooldown(upstream, model);
 			const relayActive = relayState.enabled && relayState.url !== "";
+			// A fresh WARP /64 has its own quota, so a local quota cooldown must
+			// not fail-fast when reactive recovery can rotate the egress.
 			const warpActive =
 				upstream === "opencode" &&
 				(Boolean(relayState.warp?.enabled) ||
-					Boolean(process.env.BANSOS_OPENCODE_PROXY?.trim()));
+					warpAutoActivated ||
+					Boolean(process.env.BANSOS_OPENCODE_PROXY?.trim()) ||
+					((cooldown?.kind === "quota" ||
+						cooldown?.kind === "ip-flagged") &&
+						warpRecoveryAvailable()));
 			if (
 				cooldown &&
 				!warpActive &&
 				!(cooldown.kind === "ip-flagged" && relayActive)
 			) {
-				const wait = Math.max(
+				const realWait = Math.max(
 					1,
 					Math.ceil((cooldown.until - Date.now()) / 1000),
 				);
+				// Never send a >300 s hint: OpenCode's retry loop treats it as a
+				// hard failure ("exceeds retry.maxDelayMs") instead of retrying.
+				const wait = clampRetryAfterSeconds(realWait);
 				const message =
 					cooldown.kind === "quota"
-						? `${model || upstream}: upstream free-quota cooldown (429); retry in ${wait}s (or enable /bansos warp on)`
-						: `${upstream}: this network's IP is flagged by the upstream (403); ${relayActive ? `retry in ${wait}s` : `switch egress via /bansos warp on or /bansos deploy, or retry in ${wait}s`}`;
+						? `${model || upstream}: upstream free-quota cooldown (429); retry in ${realWait}s (or enable /bansos warp on)`
+						: `${upstream}: this network's IP is flagged by the upstream (403); ${relayActive ? `retry in ${realWait}s` : `switch egress via /bansos warp on or /bansos deploy, or retry in ${realWait}s`}`;
 				res.writeHead(cooldown.kind === "quota" ? 429 : 503, {
 					"content-type": "application/json",
 					"retry-after": String(wait),
@@ -2003,7 +2174,9 @@ function startProxy(
 							"content-type":
 								response.headers.get("content-type") || "application/json",
 						};
-						const ra = response.headers.get("retry-after");
+						const ra = clientRetryAfterHeader(
+							response.headers.get("retry-after"),
+						);
 						if (ra) errHeaders["retry-after"] = ra;
 						res.writeHead(response.status, errHeaders);
 						res.end(text);
@@ -2117,9 +2290,63 @@ function startProxy(
 					const OPENCODE_OVERLOAD_MAX_MS = 4_000;
 					let overloadRetries = 0;
 					let warpHopsUsed = 0;
+					let sessionRotationsUsed = 0;
 					const envProxy = process.env.BANSOS_OPENCODE_PROXY?.trim() || "";
 					const warpCfg = relayState.warp;
 					const maxHops = warpCfg?.maxHops ?? DEFAULT_MAX_HOPS;
+					const fallbackKey = `${upstream}:${model}`;
+					let kiloFallbackTried = false;
+					const tryKiloFallbackOnce = async (): Promise<boolean> => {
+						if (
+							!KILO_FALLBACK_ENABLED ||
+							museResponses ||
+							kiloFallbackTried ||
+							reqAbort.signal.aborted
+						) {
+							return false;
+						}
+						kiloFallbackTried = true;
+						const fb = await serveKiloFallback(
+							req,
+							res,
+							rawFallbackBody,
+							model,
+							clientIP,
+							AbortSignal.any([
+								reqAbort.signal,
+								AbortSignal.timeout(300_000),
+							]),
+						);
+						if (fb.ok) {
+							opencodeFallbackUntil.set(
+								fallbackKey,
+								Date.now() + OPENCODE_FALLBACK_TTL_MS,
+							);
+							log("info", "kilo fallback served after opencode quota 429", {
+								model,
+								fallback: KILO_FALLBACK_MODEL,
+							});
+							return true;
+						}
+						log("warn", "kilo fallback failed", {
+							model,
+							error: fb.error,
+						});
+						return false;
+					};
+
+					// A recent successful fallback parks OpenCode for a few minutes:
+					// the next turns skip the guaranteed 429 + WARP hop and go
+					// straight to Kilo. Probe again after the TTL in case the daily
+					// free bucket has reset.
+					if (
+						KILO_FALLBACK_ENABLED &&
+						(opencodeFallbackUntil.get(fallbackKey) ?? 0) > Date.now() &&
+						!res.headersSent
+					) {
+						if (await tryKiloFallbackOnce()) return;
+						opencodeFallbackUntil.delete(fallbackKey);
+					}
 
 					while (!reqAbort.signal.aborted) {
 						const signal = AbortSignal.any([
@@ -2131,7 +2358,12 @@ function startProxy(
 						let via = "direct";
 
 						// 1) WARP / explicit HTTP CONNECT proxy lane (JA4 ciphers preserved).
-						const wantWarp = Boolean(warpCfg?.enabled || envProxy);
+						// Reactive WARP stays active for the rest of this process after
+						// the first successful 429/403 recovery, even if the user never
+						// ran `/bansos warp on`.
+						const wantWarp = Boolean(
+							warpCfg?.enabled || warpAutoActivated || envProxy,
+						);
 						if (wantWarp) {
 							const customProxy = envProxy || warpCfg?.proxyUrl || "";
 							const ready = customProxy
@@ -2244,18 +2476,28 @@ function startProxy(
 								continue;
 							}
 
-							// openhop / 9router #5727: auto-hop to a fresh WARP /64 on quota/IP wall.
+							// openhop / 9router #5727: auto-hop to a fresh WARP /64 on
+							// quota/IP wall. This is now reactive: it does not require
+							// `/bansos warp on` first, and it starts/installs the WARP
+							// runtime on demand. `force` bypasses the manual-hop
+							// cooldown; hopInternal still verifies the /64 actually
+							// changed before we replay the turn.
 							const canManagedHop =
-								Boolean(warpCfg?.enabled) &&
+								WARP_AUTO_RECOVERY &&
 								warpCfg?.autoHop !== false &&
 								!envProxy &&
 								!warpCfg?.proxyUrl &&
-								warpEngine.hasBinaries();
+								warpHopsUsed < maxHops &&
+								!reqAbort.signal.aborted;
+							// A second quota 429 means the fresh /64 did not clear the
+							// bucket — OpenCode's daily free quota is shared across
+							// egresses. Try Kilo before burning another hop.
+							if (kind === "quota" && warpHopsUsed >= 1) {
+								if (await tryKiloFallbackOnce()) return;
+							}
 							if (
 								(kind === "quota" || kind === "ip-flagged") &&
-								canManagedHop &&
-								warpHopsUsed < maxHops &&
-								!reqAbort.signal.aborted
+								canManagedHop
 							) {
 								warpHopsUsed++;
 								log("info", "opencode limit hit — rotating WARP /64", {
@@ -2265,9 +2507,59 @@ function startProxy(
 									hop: warpHopsUsed,
 									maxHops,
 								});
-								const hopRes = await warpEngine.hop();
-								if (hopRes.ok && !hopRes.samePrefix && !reqAbort.signal.aborted) {
-									burnOpenCodeSession(clientKey, sentSession);
+								const runtimeReady = await ensureWarpBinariesForAutoHop();
+								if (runtimeReady && !reqAbort.signal.aborted) {
+									const hopRes = await warpEngine.hop({ force: true });
+									if (
+										hopRes.ok &&
+										!hopRes.samePrefix &&
+										!reqAbort.signal.aborted
+									) {
+										warpAutoActivated = true;
+										burnOpenCodeSession(clientKey, sentSession);
+										continue;
+									}
+									log("warn", "automatic WARP hop did not yield a fresh /64", {
+										model,
+										status: response.status,
+										kind,
+										hop: warpHopsUsed,
+										error: hopRes.error,
+										samePrefix: hopRes.samePrefix,
+									});
+								} else if (!runtimeReady) {
+									log(
+										"warn",
+										"automatic WARP hop unavailable (binaries missing)",
+										{ model, status: response.status, kind },
+									);
+								}
+							}
+
+							// Hop unavailable or failed: Kilo is the last cheap recovery
+							// before the session rotation and the final 429.
+							if (kind === "quota") {
+								if (await tryKiloFallbackOnce()) return;
+							}
+
+							// A FreeUsageLimitError can also be tied to the session,
+							// not only the egress. Rotate once before surfacing the
+							// failure so a single burned session does not fail the turn.
+							if (
+								kind === "quota" &&
+								sessionRotationsUsed < 1 &&
+								!reqAbort.signal.aborted
+							) {
+								sessionRotationsUsed++;
+								const rotated = burnOpenCodeSession(clientKey, sentSession);
+								if (rotated !== sentSession) {
+									log("info", "rotating opencode session after quota 429", {
+										model,
+										via,
+										attempt: sessionRotationsUsed,
+									});
+									await abortableSleep(500);
+									if (reqAbort.signal.aborted) return;
 									continue;
 								}
 							}
@@ -2290,7 +2582,13 @@ function startProxy(
 								"x-accel-buffering": "no",
 								"x-content-type-options": "nosniff",
 							};
-							const ra = response.headers.get("retry-after");
+							// OpenCode's retry loop hard-fails on a provider wait
+							// above retry.maxDelayMs (300 s). Upstream free-tier 429s
+							// carry ~17–23 h countdowns, so clamp what we send back;
+							// the real hint still feeds the internal cooldown.
+							const ra = clientRetryAfterHeader(
+								response.headers.get("retry-after"),
+							);
 							if (ra) errHeaders["retry-after"] = ra;
 							res.writeHead(response.status, errHeaders);
 							res.end(text);
@@ -2454,8 +2752,10 @@ function statusText(transient?: string): string | undefined {
 	if (transient) return transient;
 	if (proxyState.kind === "failed") return "bansos: proxy down";
 	if (aliveCatalog.length === 0) return "bansos: no models";
-	if (relayState.warp?.enabled) {
-		return relayState.enabled ? "warp+relay: ON" : "warp: ON";
+	if (relayState.warp?.enabled || warpAutoActivated) {
+		const warpLabel =
+			warpAutoActivated && !relayState.warp?.enabled ? "warp(auto)" : "warp";
+		return relayState.enabled ? `${warpLabel}+relay: ON` : `${warpLabel}: ON`;
 	}
 	return `relay: ${relayState.enabled ? "ON" : "OFF"}`;
 }
@@ -2732,7 +3032,10 @@ export default async function (pi: ExtensionAPI) {
 					flash();
 			} else if (sub === "status") {
 				const ws = warpEngine.getStatus();
-				const warpLine = `WARP ${relayState.warp?.enabled ? "ON" : "OFF"} | running=${ws.running}${ws.lastIp ? ` (${ws.lastIp})` : ""} | hops=${ws.hops} | hits=${warpHits} | binaries=${ws.installed ? "installed" : "missing (/bansos warp setup)"}`;
+				const warpOn = Boolean(relayState.warp?.enabled || warpAutoActivated);
+				const warpMode =
+					warpAutoActivated && !relayState.warp?.enabled ? "ON (auto)" : "ON";
+				const warpLine = `WARP ${warpOn ? warpMode : "OFF"} | running=${ws.running}${ws.lastIp ? ` (${ws.lastIp})` : ""} | hops=${ws.hops} | hits=${warpHits} | binaries=${ws.installed ? "installed" : "missing (/bansos warp setup)"}`;
 				ctx.ui.notify(
 					[
 						`Relay ${relayState.enabled ? `ON → ${relayState.url}` : "OFF (direct)"} | hits=${relayHits} | saved=${relayState.relays.length}`,
@@ -2797,10 +3100,11 @@ export default async function (pi: ExtensionAPI) {
 								s.warp = {
 									...(s.warp ?? {}),
 									enabled: true,
-									autoHop: s.warp?.autoHop !== false,
+									autoHop: true,
 								};
 							})
 						) {
+							warpAutoActivated = true;
 							const ws = warpEngine.getStatus();
 							ctx.ui.notify(
 								`✓ WARP ON → ${ws.proxyUrl} | egress=${ws.lastIp ?? "?"} | auto-hop=/64`,
@@ -2809,18 +3113,26 @@ export default async function (pi: ExtensionAPI) {
 						}
 					} else if (act === "off") {
 						await warpEngine.stop();
+						warpAutoActivated = false;
 						if (
 							commit((s) => {
-								s.warp = { ...(s.warp ?? { enabled: false }), enabled: false };
+								// `off` is a full opt-out: stop primary WARP routing and
+								// reactive auto-hop until `/bansos warp on` again.
+								s.warp = {
+									...(s.warp ?? { enabled: false }),
+									enabled: false,
+									autoHop: false,
+								};
 							})
 						) {
-							ctx.ui.notify("WARP OFF", "info");
+							ctx.ui.notify("WARP OFF (auto-hop disabled)", "info");
 						}
 					} else if (act === "hop") {
 						renderStatus(ctx.ui, "hopping WARP /64…");
 						const r = await warpEngine.hop({ force: true });
 						renderStatus(ctx.ui);
 						if (r.ok) {
+							warpAutoActivated = true;
 							burnOpenCodeSession("default");
 							ctx.ui.notify(
 								`✓ WARP hopped → ${r.ip ?? "?"}${r.samePrefix ? " (same block returned by Cloudflare)" : " (fresh /64 ✓)"}`,
@@ -2833,7 +3145,7 @@ export default async function (pi: ExtensionAPI) {
 						const ws = warpEngine.getStatus();
 						ctx.ui.notify(
 							[
-								`WARP: ${relayState.warp?.enabled ? "ON" : "OFF"} (auto-hop: ${relayState.warp?.autoHop !== false ? "ON" : "OFF"})`,
+								`WARP: ${relayState.warp?.enabled ? "ON" : warpAutoActivated ? "ON (auto)" : "OFF"} (auto-hop: ${relayState.warp?.autoHop !== false ? "ON" : "OFF"})`,
 								`tunnel: ${ws.running ? `UP (pid ${ws.pid})` : "DOWN"} → ${ws.proxyUrl}`,
 								`egress IP: ${ws.lastIp ?? "n/a"} | hops: ${ws.hops}${ws.lastHopAt ? ` (last ${ws.lastHopAt})` : ""}`,
 								`binaries: ${ws.installed ? "installed" : "missing — run /bansos warp setup"}`,
@@ -2848,7 +3160,7 @@ export default async function (pi: ExtensionAPI) {
 				} else {
 					const ws = warpEngine.getStatus();
 					const pick = await ctx.ui.select("bansos WARP (/64 hop)", [
-						`WARP: ${relayState.warp?.enabled ? "ON" : "OFF"} | egress=${ws.lastIp ?? "down"} | hops=${ws.hops}`,
+						`WARP: ${relayState.warp?.enabled ? "ON" : warpAutoActivated ? "ON (auto)" : "OFF"} | egress=${ws.lastIp ?? "down"} | hops=${ws.hops}`,
 						"Turn WARP ON",
 						"Turn WARP OFF",
 						"Hop to fresh /64 now",

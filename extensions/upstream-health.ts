@@ -76,6 +76,38 @@ export function retryAfterSeconds(
 	return null;
 }
 
+/**
+ * OpenCode's client retry loop refuses any `Retry-After` above its
+ * `retry.maxDelayMs` (300 000 ms = 300 s) with
+ * "Provider requested …ms wait, exceeds retry.maxDelayMs". Upstream free-tier
+ * 429s carry countdowns to UTC midnight (~17–23 h), so the proxy must clamp
+ * the header it sends downstream — the real quota hint stays internal.
+ * 240 s leaves headroom for client-side jitter.
+ */
+export const MAX_CLIENT_RETRY_AFTER_SEC = 240;
+
+/** Clamp a numeric retry delay (seconds) for a downstream client header. */
+export function clampRetryAfterSeconds(
+	seconds: number,
+	maxSeconds = MAX_CLIENT_RETRY_AFTER_SEC,
+): number {
+	if (!Number.isFinite(seconds)) return maxSeconds;
+	return Math.min(Math.max(1, Math.ceil(seconds)), Math.max(1, maxSeconds));
+}
+
+/**
+ * Parse an upstream `Retry-After` header and clamp it for the downstream
+ * client. Returns null when the header is absent/unparseable.
+ */
+export function clientRetryAfterHeader(
+	value: string | null | undefined,
+	maxSeconds = MAX_CLIENT_RETRY_AFTER_SEC,
+): string | null {
+	const seconds = retryAfterSeconds(value);
+	if (seconds == null) return null;
+	return String(clampRetryAfterSeconds(seconds, maxSeconds));
+}
+
 type Entry = { failures: number; until: number };
 
 const QUOTA_BASE_MS = 90_000;

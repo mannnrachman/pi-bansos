@@ -29,10 +29,10 @@ Free model provider for **[pi](https://pi.dev)** ([browse packages](https://pi.d
 - **Instant startup** — the model catalog is cached locally and registered without waiting on upstream; it refreshes in the background
 - **Auto health-check** — only catalog-listed models registered; dead ones skipped silently
 - **Local-only proxy** — binds to `127.0.0.1`, nothing exposed externally; one proxy per loaded extension, shared by every session that uses it (including OMP's in-process subagents)
-- **Optional WARP `/64` outbound hop engine (no cloud account, no root)** — route OpenCode traffic through a local userspace WireGuard proxy (`wgcf` + `wireproxy` on `127.0.0.1:42901`, pinned to dedicated IPv6 `/64` blocks while keeping BoringSSL JA4 TLS ciphers intact); when an IP hits a `429` quota or `403` IP-flag wall, it automatically rotates to a fresh `/64` and retries the turn — toggled live via `/bansos warp on`
+- **Optional WARP `/64` outbound hop engine (no cloud account, no root)** — route OpenCode traffic through a local userspace WireGuard proxy (`wgcf` + `wireproxy` on `127.0.0.1:42901`, pinned to dedicated IPv6 `/64` blocks while keeping BoringSSL JA4 TLS ciphers intact); when an IP hits a `429` quota or `403` IP-flag wall, it automatically rotates to a fresh `/64` and retries the turn — **reactively, even before `/bansos warp on`** (binaries auto-install on first need; opt out with `/bansos warp off` or `BANSOS_WARP_AUTO=0`). If the fresh `/64` is already spent too (WARP blocks are shared), the turn is replayed on the **KiloCode free gateway** instead of failing.
 - **Optional cloud relay egress with automatic failover** — route through a **Cloudflare Workers** (one command, free, no card) or Vercel relay to dodge per-IP rate limits; a 429/403/unreachable relay cools down (escalating backoff) and the request rolls to the next healthy relay or goes direct — toggled live via `/bansos`
 - **OpenCode free-tier fingerprint hardened (all 5 gates)** — auto-tracks the live `opencode-ai` dev-wire UA, matches BoringSSL JA4 ClientHello ciphers (`5b57614c22b0`), isolates `ses_…` sessions per downstream client, injects `<env>` and verbatim `read` + `shell` schemas, and round-trip aliases gated tool names/pairs/schemas (`terminal`, Claude Code `ReportFindings`, Codex `exec_command`, `Edit`/`Read`, and colliding names) across both SSE replies and multi-turn history
-- **Smart 429/403 triage + transient overload retry** — transient `429 "The inference service is overloaded"` responses are retried automatically in-place (up to 8×, `800 → 4000 ms` backoff) without burning your session or triggering a cooldown; real quota `429 FreeUsageLimitError` cools just that model, IP-flag `403 "abusive traffic"` fails fast with an egress switch hint (`/bansos warp on` or `/bansos deploy`), and shape-gate `403` rotates the session and surfaces the error cleanly
+- **Smart 429/403 triage + transient overload retry** — transient `429 "The inference service is overloaded"` responses are retried automatically in-place (up to 8×, `800 → 4000 ms` backoff) without burning your session or triggering a cooldown; real quota `429 FreeUsageLimitError` cools just that model and, after a WARP hop still hits a spent `/64`, is replayed on the KiloCode free gateway so the client gets a `200`; IP-flag `403 "abusive traffic"` fails fast with an egress switch hint (`/bansos warp on` or `/bansos deploy`), and shape-gate `403` rotates the session and surfaces the error cleanly
 - **Auto port bump** — if port 18080 is taken, automatically tries the next one (up to 18100)
 
 ## Models
@@ -184,7 +184,7 @@ Run `/bansos` any time (works identically in **pi** and **OMP**):
 | `/bansos warp`                  | Interactive WARP `/64` hop menu (turn ON/OFF, hop `/64` now, install binaries, status)    |
 | `/bansos warp setup`            | Download & SHA-256-verify `wgcf` + `wireproxy` into `<agentDir>/bansos-warp/bin/`         |
 | `/bansos warp on`               | Start userspace WARP IPv6 tunnel & enable auto-hop on `429`/`403` (auto-runs setup once)  |
-| `/bansos warp off`              | Stop WARP `wireproxy` child process and disable WARP routing                              |
+| `/bansos warp off`              | Stop WARP `wireproxy`, disable WARP routing, and opt out of reactive auto-hop              |
 | `/bansos warp hop`              | Immediately rotate to a fresh Cloudflare WARP IPv6 `/64` block and mint a fresh session   |
 | `/bansos warp status`           | Show WARP tunnel PID, active egress IPv6, hop count, and binary status                    |
 | `/bansos on`                    | Route through the active cloud relay                                                      |
@@ -208,11 +208,15 @@ BANSOS_OPENCODE_PROXY=http://127.0.0.1:8080 pi # route OpenCode via a custom HTT
 WARP_PROXY_PORT=42901 pi                     # local wireproxy port for /bansos warp (default 42901)
 WARP_WGCF_PATH=/path/to/wgcf pi              # custom wgcf binary path
 WARP_WIREPROXY_PATH=/path/to/wireproxy pi    # custom wireproxy binary path
+BANSOS_WARP_AUTO=0 pi                        # disable reactive WARP auto-hop on 429/403
+BANSOS_WARP_AUTO_SETUP=0 pi                  # never auto-download WARP binaries (manual /bansos warp setup)
+BANSOS_KILO_FALLBACK=0 pi                    # disable replaying a spent OpenCode 429 on Kilo's free gateway
+BANSOS_KILO_FALLBACK_MODEL=kilo-auto/free pi # Kilo router used by the fallback (default kilo-auto/free)
 ```
 
 ## WARP /64 hop (optional)
 
-When your network's real IP exhausts OpenCode's daily free quota (`429 FreeUsageLimitError`) or sits on a flagged CGNAT/VPN range (`403 abusive traffic`), `/bansos warp on` solves it locally **without needing a Cloudflare/Vercel account, API token, or `sudo`/root**:
+When your network's real IP exhausts OpenCode's daily free quota (`429 FreeUsageLimitError`) or sits on a flagged CGNAT/VPN range (`403 abusive traffic`), pi-bansos solves it locally **without needing a Cloudflare/Vercel account, API token, or `sudo`/root**. This works reactively: the first recoverable `429`/`403` triggers a `/64` hop automatically, even if you never ran `/bansos warp on` (the WARP binaries are downloaded and SHA-256-verified on demand).
 
 ```text
 /bansos warp on
@@ -226,8 +230,10 @@ How it works (adapted from [openhop](https://openhop.cfd/source/) and 9router [#
 
 1. **Isolated to OpenCode only** — `wireproxy` runs in userspace and binds `127.0.0.1:42901`. Your browser, SSH, games, and other apps stay on your normal connection and never drop when WARP rotates.
 2. **Dedicated IPv6 `/64` pinning (even on IPv4-only ISPs)** — WARP's IPv4 egress shares a small `/24` CGNAT pool, whereas IPv6 assigns a fresh `/64` block per registration. `pi-bansos` pins the inner WireGuard interface to IPv6 while carrying the outer UDP tunnel over your normal IPv4/IPv6 link, and tunnels TLS with `OPENCODE_CIPHER_LIST` so OpenCode's JA4 check passes.
-3. **Automatic recovery on 429/403** — if a turn hits a `429` quota wall or `403` IP flag while WARP is on, `pi-bansos` automatically registers a fresh WARP `/64` (verifying `sameBlock` changed, with a 45 s cooldown and `wgcf-account.toml.bak` rollback if registration fails), rotates `x-opencode-session`, and retries your request transparently.
-4. **Priority & graceful fallback** — when both WARP and a cloud relay are enabled, OpenCode prefers WARP first (no Vercel `max_tokens` clamp) and falls back to your relay or direct connection if WireGuard UDP is blocked on the current Wi-Fi.
+3. **Automatic recovery on 429/403** — if a turn hits a `429` quota wall or `403` IP flag, `pi-bansos` automatically registers a fresh WARP `/64` (verifying `sameBlock` changed, with `wgcf-account.toml.bak` rollback if registration fails), rotates `x-opencode-session`, and retries your request transparently. Reactive hops bypass the 45 s manual-hop cooldown (`force`) and retry the turn once with a fresh session even when the hop itself cannot run.
+4. **OpenCode-safe `Retry-After`** — upstream free-tier 429s carry countdowns up to ~23 h (`retry-after-ms=63008000`). OpenCode aborts with `Provider requested …ms wait, exceeds retry.maxDelayMs (300000ms)` when it sees one. The proxy now clamps every `Retry-After` it returns to **240 s**, so OpenCode keeps retrying instead of failing the turn; the real upstream hint still drives the internal cooldown.
+5. **KiloCode free fallback when a `/64` is already spent** — WARP assigns shared blocks, and a fresh registration can already be exhausted by other users. After the first hop still returns `429 FreeUsageLimitError`, `pi-bansos` replays the turn on Kilo's keyless free gateway (`kilo-auto/free` by default) instead of waiting out the countdown. The reply keeps the requested model name in JSON and SSE, carries `x-bansos-fallback: kilo:kilo-auto/free`, and parks OpenCode for 5 minutes so the next turns skip the known-bad hop and go straight to Kilo before probing OpenCode again. Disable with `BANSOS_KILO_FALLBACK=0`; pick another router with `BANSOS_KILO_FALLBACK_MODEL`.
+6. **Priority & graceful fallback** — when both WARP and a cloud relay are enabled, OpenCode prefers WARP first (no Vercel `max_tokens` clamp) and falls back to your relay or direct connection if WireGuard UDP is blocked on the current Wi-Fi.
 
 ## Relay (optional)
 
@@ -301,7 +307,8 @@ All state lives outside the package directory, so npm updates never wipe it. The
 - Free upstream models are best-effort: promos can expire, model IDs can change, and rate limits may apply
 - pi-bansos health-checks against the cached/live catalog at startup so unavailable models are skipped instead of registered
 - KiloCode gateway: 200 req/hr per IP, keyless
-- Upstream refusals are triaged, not replayed blindly: transient `429 "overloaded"` responses are retried automatically (~20 s window); quota `429 FreeUsageLimitError` rotates the client's session (and auto-hops `/64` when WARP is on, or cools just that model on direct egress); IP-flag `403 "abusive traffic"` fails fast with a switch-egress hint (`/bansos warp on` or `/bansos deploy`) when neither WARP nor a relay is active; any 2xx clears cooldowns
+- Upstream refusals are triaged, not replayed blindly: transient `429 "overloaded"` responses are retried automatically (~20 s window); quota `429 FreeUsageLimitError` auto-hops to a fresh WARP `/64` (reactive even before `/bansos warp on`) and rotates the client's session, or cools just that model when WARP is unavailable; IP-flag `403 "abusive traffic"` fails fast with a switch-egress hint (`/bansos warp on` or `/bansos deploy`) when neither WARP nor a relay is active; any 2xx clears cooldowns
+- Every `Retry-After` returned to OpenCode is clamped to **240 s** so a multi-hour upstream quota countdown never trips `retry.maxDelayMs`; the unclamped hint is still used internally for cooldown escalation
 - OpenCode's free limits are dynamic and metered per account/workspace/network — a shared or CGNAT IP can be flagged because of *other* users, which is where `/bansos warp on` or `/bansos deploy` helps immediately
 - Catalog specs (context, max output, modalities) come from the curated model lists in the extension; the cache only stores which IDs are alive
 
