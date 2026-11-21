@@ -1394,14 +1394,6 @@ const KNOWN_MODELS: ModelDef[] = [
 		maxTokens: 131_072,
 	},
 	{
-		id: "crouton-alpha-free",
-		name: "Crouton Alpha Free",
-		reasoning: true,
-		contextWindow: 1_048_576,
-		maxTokens: 270_000,
-		input: ["text", "image"],
-	},
-	{
 		id: "iceman-free",
 		name: "Iceman Free",
 		reasoning: true,
@@ -1409,11 +1401,19 @@ const KNOWN_MODELS: ModelDef[] = [
 		maxTokens: 131_072,
 	},
 	{
-		id: "inkling-2-small-free",
-		name: "Inkling 2 Small Free",
+		id: "hy4-flash-free",
+		name: "Hy4 Flash Free",
 		reasoning: true,
 		contextWindow: 1_048_576,
-		maxTokens: 131_072,
+		maxTokens: 65_536,
+		input: ["text", "image"],
+	},
+	{
+		id: "longcat-2.5-free",
+		name: "LongCat 2.5 Free",
+		reasoning: true,
+		contextWindow: 1_000_000,
+		maxTokens: 262_144,
 		input: ["text", "image"],
 	},
 	{
@@ -1454,12 +1454,11 @@ const KNOWN_MODELS: ModelDef[] = [
 		maxTokens: 65_536,
 	},
 	{
-		id: "glm-5.3-flash-free",
-		name: "GLM 5.3 Flash Free",
+		id: "tidepool-alpha-free",
+		name: "Tidepool Alpha Free",
 		reasoning: true,
-		contextWindow: 200_000,
-		maxTokens: 32_000,
-		input: ["text", "image"],
+		contextWindow: 1_048_576,
+		maxTokens: 131_072,
 	},
 	{
 		id: "nemotron-3.5-super-vl-free",
@@ -1476,6 +1475,14 @@ const KNOWN_MODELS: ModelDef[] = [
 // gone: recursive/flint-v1.0, xingchen-agi/xing4.0, nemotron-3-super,
 // nemotron-3.5-content-safety, poolside/laguna-s. All 8 survivors chat-
 // verified 200 today (nemotron-ultra needed one retry past a transient 503).
+// Sweep 2026-11-21 (live catalog): gone: dots-studio/dots-3-note-preview:free,
+// cohere/north-mini-code:free. Added six keyless-verified-200 entries —
+// reflection/beam-free, baidu/ernie-5.5-flash-preview:free,
+// inclusionai/ling-3.2-flash:free, liquid/lfm-3-1.7b:free,
+// particle-ai/particle-1:free, recursive/flint-v1.0:free (back, now with the
+// :free suffix). kilo-auto/{balanced,efficient,frontier,small} are NOT free
+// (dynamic or metered pricing) and stay unregistered; openrouter/free stays
+// pinned (catalog-absent but callable, per the 2026-11-06 sweep note).
 const KILO_MODELS: ModelDef[] = [
 	{
 		id: "kilo-auto/free",
@@ -1493,20 +1500,12 @@ const KILO_MODELS: ModelDef[] = [
 		thinkingFormat: "openrouter",
 	},
 	{
-		id: "dots-studio/dots-3-note-preview:free",
-		name: "Dots3-Note Preview Free",
+		id: "reflection/beam-free",
+		name: "Beam Free (Kilo)",
 		reasoning: true,
-		contextWindow: 512_000,
-		maxTokens: 460_800,
-		input: ["text", "image"],
+		contextWindow: 1_048_576,
+		maxTokens: 131_072,
 		thinkingFormat: "openrouter",
-	},
-	{
-		id: "cohere/north-mini-code:free",
-		name: "North Mini Code Free",
-		reasoning: false,
-		contextWindow: 256_000,
-		maxTokens: 64_000,
 	},
 	{
 		id: "nvidia/nemotron-3-nano-omni-30b-a3b-reasoning:free",
@@ -1515,6 +1514,48 @@ const KILO_MODELS: ModelDef[] = [
 		contextWindow: 256_000,
 		maxTokens: 65_536,
 		input: ["text", "image"],
+		thinkingFormat: "openrouter",
+	},
+	{
+		id: "baidu/ernie-5.5-flash-preview:free",
+		name: "ERNIE 5.5 Flash Preview Free",
+		reasoning: true,
+		contextWindow: 1_024_000,
+		maxTokens: 921_600,
+		thinkingFormat: "openrouter",
+	},
+	{
+		id: "inclusionai/ling-3.2-flash:free",
+		name: "Ling 3.2 Flash Free",
+		reasoning: true,
+		contextWindow: 1_048_576,
+		maxTokens: 262_144,
+		input: ["text", "image"],
+		thinkingFormat: "openrouter",
+	},
+	{
+		id: "liquid/lfm-3-1.7b:free",
+		name: "LFM 3 1.7B Free",
+		reasoning: true,
+		contextWindow: 262_144,
+		maxTokens: 8_192,
+		thinkingFormat: "openrouter",
+	},
+	{
+		id: "particle-ai/particle-1:free",
+		name: "Particle 1 Free",
+		reasoning: true,
+		contextWindow: 1_048_576,
+		maxTokens: 131_072,
+		input: ["text", "image"],
+		thinkingFormat: "openrouter",
+	},
+	{
+		id: "recursive/flint-v1.0:free",
+		name: "Flint v1.0 Free",
+		reasoning: true,
+		contextWindow: 262_144,
+		maxTokens: 235_929,
 		thinkingFormat: "openrouter",
 	},
 	{
@@ -1886,11 +1927,23 @@ function pipeUpstreamStream(
 			: (restorer ?? rewriteLine);
 	if (transform) {
 		const decoder = new StringDecoder("utf8");
+		// A stream that never emits a newline would grow `carry` without
+		// bound. Destroy rather than truncate: a cut SSE line would corrupt
+		// the JSON payload of the event it belongs to.
+		const MAX_SSE_CARRY_BYTES = 512 * 1024;
 		let carry = "";
 		nodeStream.on("data", (chunk: Buffer) => {
 			const text = carry + decoder.write(chunk);
 			const lines = text.split("\n");
 			carry = lines.pop() ?? "";
+			if (carry.length > MAX_SSE_CARRY_BYTES) {
+				log("error", "upstream SSE line exceeded buffer bound; aborting stream", {
+					bytes: carry.length,
+				});
+				nodeStream.destroy();
+				res.end();
+				return;
+			}
 			const out = lines.map(transform).join("\n");
 			// Preserve terminators even when the completed line is empty:
 			// blank lines delimit SSE events, including across chunk boundaries.
@@ -2086,6 +2139,97 @@ function startProxy(
 			const upstream: Upstream = isKilo ? "kilo" : "opencode";
 			const model =
 				typeof parsedBody?.model === "string" ? parsedBody.model : "";
+			// OpenCode lane prelude — hoisted above the local rate limiter and
+			// cooldown guard so a circuit-served Kilo turn consumes neither an
+			// OpenCode rate-limit slot nor a fail-fast cooldown response.
+			const clientKey = clientSessionKey(req.headers);
+			const rawFallbackBody = bodyChunks.length
+				? Buffer.concat(bodyChunks)
+				: Buffer.alloc(0);
+			let museResponses = false;
+			let toolAliases: Record<string, string> | undefined;
+			if (parsedBody && upstream === "opencode") {
+				museResponses = transformOpencodeBody(
+					parsedBody,
+					clientKey,
+				).responsesPath;
+				if (parsedBody.__bansosToolAliases) {
+					toolAliases = parsedBody.__bansosToolAliases as Record<
+						string,
+						string
+					>;
+					delete parsedBody.__bansosToolAliases;
+				}
+			}
+			const reqAbort = new AbortController();
+			const onClientDisconnect = () => {
+				if (!res.writableEnded) reqAbort.abort(new Error("client disconnected"));
+			};
+			req.once("aborted", onClientDisconnect);
+			res.once("close", onClientDisconnect);
+			const fallbackKey = `${upstream}:${model}`;
+			let kiloFallbackTried = false;
+			const tryKiloFallbackOnce = async (): Promise<boolean> => {
+				if (
+					!KILO_FALLBACK_ENABLED ||
+					museResponses ||
+					kiloFallbackTried ||
+					reqAbort.signal.aborted
+				) {
+					return false;
+				}
+				kiloFallbackTried = true;
+				const fb = await serveKiloFallback(
+					req,
+					res,
+					rawFallbackBody,
+					model,
+					clientIP,
+					AbortSignal.any([
+						reqAbort.signal,
+						AbortSignal.timeout(300_000),
+					]),
+				);
+				if (fb.ok) {
+					// Park OpenCode only when FIRST entering fallback mode for
+					// this key: circuit-served successes must not push the probe
+					// deadline out indefinitely, or OpenCode is never re-tested
+					// while traffic keeps flowing.
+					if (!opencodeFallbackUntil.has(fallbackKey))
+						opencodeFallbackUntil.set(
+							fallbackKey,
+							Date.now() + OPENCODE_FALLBACK_TTL_MS,
+						);
+					log("info", "kilo fallback served after opencode quota 429", {
+						model,
+						fallback: KILO_FALLBACK_MODEL,
+					});
+					return true;
+				}
+				log("warn", "kilo fallback failed", {
+					model,
+					error: fb.error,
+				});
+				return false;
+			};
+			// Serve requests whose model is parked on Kilo, or whose model
+			// carries an active OpenCode quota cooldown, BEFORE the local rate
+			// limiter and cooldown guard: Kilo's keyless gateway has its own
+			// quota (checked inside serveKiloFallback), so a Kilo turn must not
+			// burn OpenCode rate-limit budget, and a recorded OpenCode cooldown
+			// must not hide a Kilo that is still alive. If Kilo also refuses,
+			// fall through to the normal OpenCode path — the cooldown stays.
+			if (
+				upstream === "opencode" &&
+				KILO_FALLBACK_ENABLED &&
+				!museResponses &&
+				!res.headersSent &&
+				((opencodeFallbackUntil.get(fallbackKey) ?? 0) > Date.now() ||
+					upstreamHealth.cooldown(upstream, model)?.kind === "quota")
+			) {
+				if (await tryKiloFallbackOnce()) return;
+				opencodeFallbackUntil.delete(fallbackKey);
+			}
 			const limit = checkRateLimit(clientIP, upstream);
 			if (!limit.ok) {
 				// OpenCode aborts its retry loop when a provider asks for more
@@ -2208,26 +2352,9 @@ function startProxy(
 				} else {
 					// OpenCode routing — apply free-tier fingerprint, transient 429
 					// overload retries (#5583), and optional WARP /64 auto-hop (#5727).
-					const clientKey = clientSessionKey(req.headers);
-					const rawFallbackBody = bodyChunks.length
-						? Buffer.concat(bodyChunks)
-						: Buffer.alloc(0);
-					let museResponses = false;
-					let toolAliases: Record<string, string> | undefined;
-					if (parsedBody) {
-						museResponses = transformOpencodeBody(
-							parsedBody,
-							clientKey,
-						).responsesPath;
-						if (parsedBody.__bansosToolAliases) {
-							toolAliases = parsedBody.__bansosToolAliases as Record<
-								string,
-								string
-							>;
-							delete parsedBody.__bansosToolAliases;
-						}
-					}
-
+					// clientKey, rawFallbackBody, museResponses/toolAliases, reqAbort,
+					// and the Kilo fallback circuit live above the rate limiter so
+					// circuit-served turns skip the OpenCode guards entirely.
 					const serializeOpencodeBody = (forRelay: boolean): Buffer => {
 						if (!parsedBody) return rawFallbackBody;
 						if (!museResponses) {
@@ -2261,13 +2388,6 @@ function startProxy(
 							: inbound;
 					const fullUrl = `${UPSTREAM_OPENCODE}${upstreamPath}`;
 
-					const reqAbort = new AbortController();
-					const onClientDisconnect = () => {
-						if (!res.writableEnded) reqAbort.abort(new Error("client disconnected"));
-					};
-					req.once("aborted", onClientDisconnect);
-					res.once("close", onClientDisconnect);
-
 					const abortableSleep = (ms: number): Promise<void> =>
 						new Promise((resolveSleep) => {
 							if (reqAbort.signal.aborted) {
@@ -2294,59 +2414,6 @@ function startProxy(
 					const envProxy = process.env.BANSOS_OPENCODE_PROXY?.trim() || "";
 					const warpCfg = relayState.warp;
 					const maxHops = warpCfg?.maxHops ?? DEFAULT_MAX_HOPS;
-					const fallbackKey = `${upstream}:${model}`;
-					let kiloFallbackTried = false;
-					const tryKiloFallbackOnce = async (): Promise<boolean> => {
-						if (
-							!KILO_FALLBACK_ENABLED ||
-							museResponses ||
-							kiloFallbackTried ||
-							reqAbort.signal.aborted
-						) {
-							return false;
-						}
-						kiloFallbackTried = true;
-						const fb = await serveKiloFallback(
-							req,
-							res,
-							rawFallbackBody,
-							model,
-							clientIP,
-							AbortSignal.any([
-								reqAbort.signal,
-								AbortSignal.timeout(300_000),
-							]),
-						);
-						if (fb.ok) {
-							opencodeFallbackUntil.set(
-								fallbackKey,
-								Date.now() + OPENCODE_FALLBACK_TTL_MS,
-							);
-							log("info", "kilo fallback served after opencode quota 429", {
-								model,
-								fallback: KILO_FALLBACK_MODEL,
-							});
-							return true;
-						}
-						log("warn", "kilo fallback failed", {
-							model,
-							error: fb.error,
-						});
-						return false;
-					};
-
-					// A recent successful fallback parks OpenCode for a few minutes:
-					// the next turns skip the guaranteed 429 + WARP hop and go
-					// straight to Kilo. Probe again after the TTL in case the daily
-					// free bucket has reset.
-					if (
-						KILO_FALLBACK_ENABLED &&
-						(opencodeFallbackUntil.get(fallbackKey) ?? 0) > Date.now() &&
-						!res.headersSent
-					) {
-						if (await tryKiloFallbackOnce()) return;
-						opencodeFallbackUntil.delete(fallbackKey);
-					}
 
 					while (!reqAbort.signal.aborted) {
 						const signal = AbortSignal.any([
@@ -2499,40 +2566,57 @@ function startProxy(
 								(kind === "quota" || kind === "ip-flagged") &&
 								canManagedHop
 							) {
-								warpHopsUsed++;
-								log("info", "opencode limit hit — rotating WARP /64", {
-									model,
-									status: response.status,
-									kind,
-									hop: warpHopsUsed,
-									maxHops,
-								});
-								const runtimeReady = await ensureWarpBinariesForAutoHop();
-								if (runtimeReady && !reqAbort.signal.aborted) {
-									const hopRes = await warpEngine.hop({ force: true });
-									if (
-										hopRes.ok &&
-										!hopRes.samePrefix &&
-										!reqAbort.signal.aborted
-									) {
-										warpAutoActivated = true;
-										burnOpenCodeSession(clientKey, sentSession);
-										continue;
-									}
-									log("warn", "automatic WARP hop did not yield a fresh /64", {
+								// `/bansos warp off` (autoHop: false) or BANSOS_WARP_AUTO=0
+								// landing mid-flight must not be resurrected by an
+								// in-flight recovery: the opt-out is re-checked before
+								// the hop and again before re-activating reactive mode.
+								const warpOptedOut =
+									!WARP_AUTO_RECOVERY || relayState.warp?.autoHop === false;
+								if (warpOptedOut) {
+									log("info", "WARP auto-recovery opted out mid-flight; skipping hop", {
+										model,
+										status: response.status,
+										kind,
+									});
+								} else {
+									warpHopsUsed++;
+									log("info", "opencode limit hit — rotating WARP /64", {
 										model,
 										status: response.status,
 										kind,
 										hop: warpHopsUsed,
-										error: hopRes.error,
-										samePrefix: hopRes.samePrefix,
+										maxHops,
 									});
-								} else if (!runtimeReady) {
-									log(
-										"warn",
-										"automatic WARP hop unavailable (binaries missing)",
-										{ model, status: response.status, kind },
-									);
+									const runtimeReady = await ensureWarpBinariesForAutoHop();
+									if (runtimeReady && !reqAbort.signal.aborted) {
+										const hopRes = await warpEngine.hop({ force: true });
+										if (
+											hopRes.ok &&
+											!hopRes.samePrefix &&
+											!reqAbort.signal.aborted
+										) {
+											// The binary install + hop can take minutes;
+											// `/bansos warp off` may have landed meanwhile.
+											if (!(!WARP_AUTO_RECOVERY || relayState.warp?.autoHop === false))
+												warpAutoActivated = true;
+											burnOpenCodeSession(clientKey, sentSession);
+											continue;
+										}
+										log("warn", "automatic WARP hop did not yield a fresh /64", {
+											model,
+											status: response.status,
+											kind,
+											hop: warpHopsUsed,
+											error: hopRes.error,
+											samePrefix: hopRes.samePrefix,
+										});
+									} else if (!runtimeReady) {
+										log(
+											"warn",
+											"automatic WARP hop unavailable (binaries missing)",
+											{ model, status: response.status, kind },
+										);
+									}
 								}
 							}
 

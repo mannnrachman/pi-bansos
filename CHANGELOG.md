@@ -1,6 +1,6 @@
 # Changelog
 
-## [0.9.2] - 2026-11-20
+## [0.9.2] - 2026-11-21
 
 ### Added
 - **KiloCode free fallback when a WARP `/64` is already spent** — WARP assigns blocks from a shared pool, so a freshly registered `/64` can still return `429 FreeUsageLimitError` (live-verified: one hop landed on a clean block and returned `200`, while earlier hops landed on spent blocks). After the first hop still fails, the proxy now replays the turn on Kilo's keyless free gateway (`kilo-auto/free` by default) instead of waiting out the upstream countdown.
@@ -10,6 +10,16 @@
   - New opt-outs: `BANSOS_KILO_FALLBACK=0` disables the fallback; `BANSOS_KILO_FALLBACK_MODEL` selects another Kilo free router.
   - New pure helpers in `extensions/kilo-fallback.ts` with 4 unit tests; suite: **39/39**.
 - **Live end-to-end proof** — real OpenCode `429` → real WARP hop → `200` from OpenCode on a clean `/64` (9.4 s), and a simulated spent-block `429` → Kilo fallback `200` (model rewritten, streaming and non-streaming, second request skips OpenCode via the circuit).
+- **Model sweep 2026-11-21** — OpenCode: added `hy4-flash-free` (1M/65K, vision), `longcat-2.5-free` (1M/262K, vision), `tidepool-alpha-free` (1M/131K); dropped `crouton-alpha-free`, `glm-5.3-flash-free`, `inkling-2-small-free` (gone from the zen catalog). `jev-1.13-free` is cataloged at cost 0 but skipped (decision-only output, no tool support). KiloCode: added six keyless chat-verified-200 models — `reflection/beam-free`, `baidu/ernie-5.5-flash-preview:free`, `inclusionai/ling-3.2-flash:free`, `liquid/lfm-3-1.7b:free`, `particle-ai/particle-1:free`, `recursive/flint-v1.0:free` (back, now `:free`); dropped `dots-studio/dots-3-note-preview:free` and `cohere/north-mini-code:free` (gone). The metered `kilo-auto/{balanced,efficient,frontier,small}` routers stay unregistered. Curated totals: **23 models (11 OpenCode + 12 KiloCode)**.
+
+### Changed
+- **Circuit-served turns bypass the OpenCode local guards** (review fix) — the cached Kilo-fallback dispatch now runs BEFORE the per-client rate limiter and the cooldown guard: a turn served by Kilo no longer consumes OpenCode rate-limit budget, and an active OpenCode quota cooldown no longer hides a Kilo gateway that is still alive. If the Kilo attempt fails, the request falls through to the normal OpenCode path with the cooldown preserved.
+- `/bansos warp off` now wins over in-flight recovery (review fix) — the reactive hop path re-checks the opt-out before starting the hop and again after the (potentially minutes-long) binary install + hop, so a concurrent `/bansos warp off` (or `BANSOS_WARP_AUTO=0`) cannot be resurrected by a request that was already recovering.
+
+### Fixed
+- **Fallback park window no longer extends itself** (review fix) — the 5-minute OpenCode fallback park is set only when a model FIRST enters fallback mode; circuit-served successes used to reset the deadline on every turn, which could keep OpenCode from ever being re-probed while traffic flowed.
+- **Unbounded SSE line buffer** (review fix) — `pipeUpstreamStream` now bounds the carry buffer for an unterminated SSE line at 512 KiB and destroys the stream (ending the response) instead of truncating, which would have corrupted the event's JSON payload. Kilo-fallback streams reach this path via the model-name rewrite.
+- Contract tests updated to the 2026-11-21 catalogs; suite: **39/39**, plus an end-to-end smoke harness run against the real proxy (fallback dispatch, cached circuit without upstream hits, SSE model rewrite, `Retry-After` clamp 63008→240, cooldown-time Kilo service).
 
 ## [0.9.1] - 2026-11-20
 
