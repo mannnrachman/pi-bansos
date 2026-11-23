@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.9.3] - 2026-11-23
+
+### Fixed
+- **Reactive WARP `/64` hop no longer discarded when the tunnel is slow to become ready** — live-reproduced: after a fresh registration, the first successful Cloudflare trace through the new tunnel can take longer than the 25 s readiness window (`32.5 s` observed), and the hop was declared failed *after* the tunnel came up, throwing away the fresh `/64` and falling through to the Kilo fallback every time (the openhop reference implementation tolerates slow/failed rotations the same way their keeper retries). `hop()` now re-spawns `wireproxy` once and waits a second full readiness window **inside the same attempt** — the fresh registration is never wasted on a slow handshake. If both windows fail, the hop still fails cleanly and the best-effort restart brings the tunnel up on the newly registered `/64`.
+- New deterministic regression coverage: slow-readiness hop succeeds via respawn (`tests/warp-hop.test.ts`), plus the both-windows-fail clean-failure path. Suite: **41/41**.
+- Live verification (this machine, real Cloudflare/WARP): quota `429` → reactive auto-hop → fresh `/64` → **`200` from OpenCode through the WARP tunnel** (10.9 s, no fallback needed); with a spent `/64`, the Kilo fallback still saves the turn (`200` via `kilo-auto/free`).
+
 ## [0.9.2] - 2026-11-21
 
 ### Added

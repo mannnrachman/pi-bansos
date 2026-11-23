@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import type { ChildProcess } from "node:child_process";
 import { EventEmitter } from "node:events";
 import fs from "node:fs";
 import http from "node:http";
@@ -250,6 +251,135 @@ test("WarpHopEngine: cold hop starts the tunnel and force bypasses the manual co
 		assert.equal(forced.samePrefix, false);
 		assert.equal(forced.ip, ips[1]);
 		assert.equal(regCounter, 2);
+
+		await engine.stop();
+	} finally {
+		fs.rmSync(dir, { recursive: true, force: true });
+	}
+});
+
+test("WarpHopEngine: hop survives a slow tunnel by respawning once instead of discarding the fresh /64", async () => {
+	const dir = fs.mkdtempSync(path.join(tmpdir(), "bansos-warp-slow-"));
+	try {
+		const binDir = path.join(dir, "bin");
+		fs.mkdirSync(binDir, { recursive: true });
+		const ext = process.platform === "win32" ? ".exe" : "";
+		fs.writeFileSync(path.join(binDir, `wgcf${ext}`), "stub", { mode: 0o755 });
+		fs.writeFileSync(path.join(binDir, `wireproxy${ext}`), "stub", { mode: 0o755 });
+
+		let clock = 2_000_000;
+		let regCounter = 0;
+		let spawnCount = 0;
+		const logs: string[] = [];
+		const engine = new WarpHopEngine({
+			dataDir: dir,
+			proxyPort: 43999,
+			now: () => clock,
+			readyPollMs: 5,
+			readyTimeoutMs: 1_000,
+			killStaleFn: async () => {},
+			onLog: (level, message) => logs.push(`${level}: ${message}`),
+			runCmd: async (_bin, args, cwd) => {
+				if (args[0] === "register") {
+					regCounter++;
+					fs.writeFileSync(
+						path.join(cwd, "wgcf-account.toml"),
+						`device_id = "slow-${regCounter}"\n`,
+					);
+					return { code: 0, stdout: "ok", stderr: "" };
+				}
+				if (args[0] === "generate") {
+					fs.writeFileSync(
+						path.join(cwd, "wgcf-profile.conf"),
+						"[Interface]\nPrivateKey = dummy\n",
+					);
+					return { code: 0, stdout: "ok", stderr: "" };
+				}
+				return { code: 1, stdout: "", stderr: "unexpected" };
+			},
+			spawnDaemon: () => {
+				spawnCount++;
+				// Minimal stand-in: the engine only touches pid, kill and the
+				// exit event, so the structural cast is safe here.
+				const fake = new EventEmitter() as unknown as ChildProcess;
+				fake.pid = 30000 + spawnCount;
+				fake.kill = () => fake.emit("exit", 0);
+				return fake;
+			},
+			// First spawn: the WireGuard handshake is slow — every trace fails
+			// and the fake clock advances past the readiness window. After the
+			// respawn the tunnel answers immediately.
+			traceFn: async () => {
+				clock += 200;
+				if (spawnCount === 1) return null;
+				return { ip: "2606:4700:110:30::7", warp: "on" };
+			},
+		});
+
+		const hop = await engine.hop({ force: true });
+		assert.equal(hop.ok, true, `hop should succeed after respawn: ${hop.error}`);
+		assert.equal(hop.ip, "2606:4700:110:30::7");
+		assert.equal(hop.samePrefix, false);
+		assert.equal(regCounter, 1, "registration must not be redone for the retry");
+		assert.equal(spawnCount, 2, "exactly one respawn within the same attempt");
+		assert.ok(logs.some((l) => l.includes("retrying spawn")), "retry must be logged");
+		assert.equal(engine.getStatus().running, true);
+		assert.equal(engine.getStatus().lastIp, "2606:4700:110:30::7");
+
+		await engine.stop();
+	} finally {
+		fs.rmSync(dir, { recursive: true, force: true });
+	}
+});
+
+test("WarpHopEngine: hop fails cleanly when the tunnel never becomes ready", async () => {
+	const dir = fs.mkdtempSync(path.join(tmpdir(), "bansos-warp-dead-"));
+	try {
+		const binDir = path.join(dir, "bin");
+		fs.mkdirSync(binDir, { recursive: true });
+		const ext = process.platform === "win32" ? ".exe" : "";
+		fs.writeFileSync(path.join(binDir, `wgcf${ext}`), "stub", { mode: 0o755 });
+		fs.writeFileSync(path.join(binDir, `wireproxy${ext}`), "stub", { mode: 0o755 });
+
+		let clock = 3_000_000;
+		const engine = new WarpHopEngine({
+			dataDir: dir,
+			proxyPort: 44001,
+			now: () => clock,
+			readyPollMs: 5,
+			readyTimeoutMs: 1_000,
+			killStaleFn: async () => {},
+			runCmd: async (_bin, args, cwd) => {
+				if (args[0] === "register") {
+					fs.writeFileSync(path.join(cwd, "wgcf-account.toml"), 'device_id = "x"\n');
+					return { code: 0, stdout: "ok", stderr: "" };
+				}
+				if (args[0] === "generate") {
+					fs.writeFileSync(path.join(cwd, "wgcf-profile.conf"), "[Interface]\nPrivateKey = dummy\n");
+					return { code: 0, stdout: "ok", stderr: "" };
+				}
+				return { code: 1, stdout: "", stderr: "unexpected" };
+			},
+			spawnDaemon: () => {
+				// Minimal stand-in: the engine only touches pid, kill and the
+				// exit event, so the structural cast is safe here.
+				const fake = new EventEmitter() as unknown as ChildProcess;
+				fake.pid = 31000;
+				fake.kill = () => fake.emit("exit", 0);
+				return fake;
+			},
+			traceFn: async () => {
+				clock += 200;
+				return null;
+			},
+		});
+
+		const hop = await engine.hop({ force: true });
+		assert.equal(hop.ok, false);
+		assert.match(hop.error ?? "", /tunnel not ready after hop/);
+		// Both windows failed and the best-effort restart could not come up either.
+		assert.equal(engine.getStatus().running, false);
+		assert.equal(engine.getStatus().lastError, "tunnel not ready after hop");
 
 		await engine.stop();
 	} finally {

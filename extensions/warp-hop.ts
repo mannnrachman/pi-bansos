@@ -971,7 +971,21 @@ export class WarpHopEngine {
 			this.writeWireproxyConf();
 			await this.killStaleFn(this.wireproxyConf);
 			this.spawnChild(wireproxy);
-			const trace = await this.waitReady();
+			let trace = await this.waitReady();
+			if (!trace) {
+				// The WireGuard handshake can take longer than the standard
+				// window on a cold network (observed: first successful trace
+				// >25 s after spawn). The fresh registration is already done —
+				// re-spawn once and wait again before discarding the new /64.
+				this.onLog?.("warn", "WARP tunnel slow to become ready; retrying spawn", {
+					attempt,
+				});
+				this.stopChild();
+				this.writeWireproxyConf();
+				await this.killStaleFn(this.wireproxyConf);
+				this.spawnChild(wireproxy);
+				trace = await this.waitReady();
+			}
 			if (!trace) {
 				this.stopChild();
 				last = { ok: false, error: "tunnel not ready after hop" };
@@ -1000,7 +1014,9 @@ export class WarpHopEngine {
 
 		if (!last.ok) {
 			this.lastError = last.error ?? "hop failed";
-			// Best effort: restore tunnel using preserved backup account if possible.
+			// Best effort: bring the tunnel back up. The account from the
+			// failed hop stays in place, so this restarts wireproxy on the
+			// freshly registered /64 (registration is not redone).
 			try {
 				await this.startInternal();
 			} catch {}
